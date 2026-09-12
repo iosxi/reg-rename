@@ -1,0 +1,99 @@
+# Windows Device Name Manager - MSVC (NMAKE) build
+#
+#   build.bat               release build
+#   build.bat uitest        UI check build (no UAC prompt)
+#   build.bat test          non-GUI smoke test
+#   build.bat clean
+#
+# If you already have a vcvars64 environment, call nmake directly:
+#   nmake /f Makefile.msvc
+#
+# NOTE: this file must stay ASCII-only. NMAKE reads makefiles in the OEM
+# code page (932 on Japanese Windows); UTF-8 Japanese bytes can decode to
+# 0x5C there, which NMAKE then treats as a line continuation and reports
+# as "U1035 syntax error". Japanese comments belong in the C sources.
+# (GNU make does not have this problem, so the MinGW Makefile keeps them.)
+
+CC      = cl
+RC      = rc
+LINK    = link
+
+SRCDIR  = src
+OBJDIR  = build\objcl
+BINDIR  = build
+TARGET  = $(BINDIR)\DeviceNameManager.exe
+UITARGET= $(BINDIR)\DeviceNameManager-uitest.exe
+SMOKE   = $(BINDIR)\smoke.exe
+
+# /utf-8    source is UTF-8; required for the Japanese wide literals
+# /DUNICODE resolve Win32 APIs to the W variants. Without it
+#           ListView_SetItemText and friends bind to the ANSI versions
+#           and render wide strings as garbage. dnm.h has an #error
+#           guard so this can never be forgotten silently.
+# WIN32_LEAN_AND_MEAN is defined by dnm.h and guids.c, so it is not passed
+# here (doing both raises C4005 "macro redefinition").
+CFLAGS = /nologo /c /W3 /O2 /MT /utf-8 /GS \
+         /DUNICODE /D_UNICODE \
+         /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00 /DNTDDI_VERSION=0x0A000000 \
+         /D_CRT_SECURE_NO_WARNINGS /I$(SRCDIR)
+
+# No newdev.lib and no netshell.lib here: DiUninstallDevice and
+# NcIsValidConnectionName are resolved at run time from their DLLs in
+# devops.c, so both toolchains behave identically. netshell.lib does not
+# ship with the Windows SDK at all.
+LIBS = setupapi.lib cfgmgr32.lib comctl32.lib ole32.lib oleaut32.lib \
+       propsys.lib uuid.lib shell32.lib advapi32.lib user32.lib gdi32.lib
+
+# /MANIFEST:NO - app.rc already carries RT_MANIFEST #1, so link.exe must
+# not generate a second manifest of its own.
+LDFLAGS         = /nologo /SUBSYSTEM:WINDOWS /MANIFEST:NO
+LDFLAGS_CONSOLE = /nologo /SUBSYSTEM:CONSOLE /MANIFEST:NO
+
+OBJS = $(OBJDIR)\guids.obj $(OBJDIR)\util.obj $(OBJDIR)\devlist.obj \
+       $(OBJDIR)\devops.obj $(OBJDIR)\matching.obj $(OBJDIR)\safety.obj \
+       $(OBJDIR)\history.obj $(OBJDIR)\ui_dlg.obj $(OBJDIR)\ui_main.obj
+
+SMOKEOBJS = $(OBJDIR)\guids.obj $(OBJDIR)\util.obj $(OBJDIR)\devlist.obj \
+            $(OBJDIR)\matching.obj $(OBJDIR)\safety.obj $(OBJDIR)\history.obj \
+            $(OBJDIR)\smoke.obj
+
+all: $(TARGET)
+
+$(TARGET): $(OBJS) $(OBJDIR)\app.res
+	$(LINK) $(LDFLAGS) /OUT:$@ $(OBJS) $(OBJDIR)\app.res $(LIBS)
+
+uitest: $(UITARGET)
+
+$(UITARGET): $(OBJS) $(OBJDIR)\app-uitest.res
+	$(LINK) $(LDFLAGS) /OUT:$@ $(OBJS) $(OBJDIR)\app-uitest.res $(LIBS)
+
+test: $(SMOKE)
+
+$(SMOKE): $(SMOKEOBJS)
+	$(LINK) $(LDFLAGS_CONSOLE) /OUT:$@ $(SMOKEOBJS) $(LIBS)
+
+# --- compile ---------------------------------------------------------
+.SUFFIXES: .c .obj
+
+{$(SRCDIR)}.c{$(OBJDIR)}.obj::
+	@if not exist $(OBJDIR) md $(OBJDIR)
+	$(CC) $(CFLAGS) /Fo$(OBJDIR)\ $<
+
+$(OBJDIR)\smoke.obj: tests\smoke.c $(SRCDIR)\dnm.h
+	@if not exist $(OBJDIR) md $(OBJDIR)
+	$(CC) $(CFLAGS) /Fo$@ /c tests\smoke.c
+
+# --- resources -------------------------------------------------------
+$(OBJDIR)\app.res: $(SRCDIR)\app.rc $(SRCDIR)\app.manifest $(SRCDIR)\resource.h
+	@if not exist $(OBJDIR) md $(OBJDIR)
+	$(RC) /nologo /I$(SRCDIR) /fo$@ $(SRCDIR)\app.rc
+
+$(OBJDIR)\app-uitest.res: $(SRCDIR)\app.rc $(SRCDIR)\app-uitest.manifest $(SRCDIR)\resource.h
+	@if not exist $(OBJDIR) md $(OBJDIR)
+	$(RC) /nologo /I$(SRCDIR) /dDNM_MANIFEST=\"app-uitest.manifest\" /fo$@ $(SRCDIR)\app.rc
+
+clean:
+	@if exist $(OBJDIR) rd /s /q $(OBJDIR)
+	@if exist $(TARGET) del /q $(TARGET)
+	@if exist $(UITARGET) del /q $(UITARGET)
+	@if exist $(SMOKE) del /q $(SMOKE)

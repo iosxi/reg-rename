@@ -1,0 +1,107 @@
+/*
+ * app.rc - ダイアログテンプレートとマニフェスト
+ *
+ * 表示文字列はすべて C 側 (ui_dlg.c) から SetDlgItemTextW で流し込む。
+ * windres のコードページ依存を持ち込まないため、このファイルは ASCII のみ。
+ */
+#include <windows.h>
+#include <commctrl.h>
+#include "resource.h"
+
+/* 管理者権限マニフェスト。
+ * UI 確認ビルドでは windres -DDNM_MANIFEST=\"app-uitest.manifest\" で
+ * asInvoker 版に差し替える (UAC を出さずに画面を確かめるため)。 */
+#ifndef DNM_MANIFEST
+#define DNM_MANIFEST "app.manifest"
+#endif
+1 RT_MANIFEST DNM_MANIFEST
+
+/* ------------------------------------------------------------------ */
+/* 名前を変更 (設計書 3.2 / 7.2)                                       */
+/* ------------------------------------------------------------------ */
+/*
+ * 各行の Y 座標はあくまで初期値。実際の位置と高さは ui_dlg.c の
+ * rename_reflow() が、表示する欄とヒント文の行数に合わせて詰め直す。
+ *
+ * SS_ENDELLIPSIS を付けているのは、長い Instance ID や製品名が
+ * 折り返して静的コントロールの高さを超え、次の行に食い込むのを防ぐため。
+ *
+ * SS_NOPREFIX は必須。Instance ID には & が含まれる
+ * (USB\VID_262A&PID_9023&MI_01\8&63A6124&0&0001) ため、これが無いと
+ * & がニーモニック指定として食われて表示から消える。
+ */
+IDD_RENAME DIALOGEX 0, 0, 324, 232
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Rename"
+FONT 9, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    LTEXT           "", IDC_RN_TARGET,   10,  8, 304, 10, SS_ENDELLIPSIS | SS_NOPREFIX
+    LTEXT           "", IDC_RN_KIND,     10, 22, 304, 10, SS_ENDELLIPSIS | SS_NOPREFIX
+    LTEXT           "", IDC_RN_INSTID,   10, 36, 304, 10, SS_ENDELLIPSIS | SS_NOPREFIX
+
+    LTEXT           "", IDC_RN_LBL_PNP,  10, 58, 304,  9, SS_NOPREFIX
+    EDITTEXT            IDC_RN_EDIT_PNP, 10, 69, 228, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "", IDC_RN_BASE,    244, 69,  70, 14
+
+    LTEXT           "", IDC_RN_LBL_A,    10, 90, 304,  9, SS_NOPREFIX
+    EDITTEXT            IDC_RN_EDIT_A,   10,101, 228, 14, ES_AUTOHSCROLL
+
+    LTEXT           "", IDC_RN_LBL_B,    10,122, 304,  9, SS_NOPREFIX
+    EDITTEXT            IDC_RN_EDIT_B,   10,133, 228, 14, ES_AUTOHSCROLL
+
+    LTEXT           "", IDC_RN_HINT,     10,154, 304, 52, SS_NOPREFIX
+
+    DEFPUSHBUTTON   "", IDOK,           190,210,  60, 16
+    PUSHBUTTON      "", IDCANCEL,       254,210,  60, 16
+END
+
+/* ------------------------------------------------------------------ */
+/* 削除確認 (設計書 5.3)                                               */
+/* ------------------------------------------------------------------ */
+IDD_REMOVE DIALOGEX 0, 0, 324, 196
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Remove device"
+FONT 9, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    EDITTEXT            IDC_RM_TEXT, 10, 10, 304, 152,
+                        ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL |
+                        WS_VSCROLL | NOT WS_TABSTOP
+    PUSHBUTTON      "", IDOK,       190,170,  60, 16
+    DEFPUSHBUTTON   "", IDCANCEL,   254,170,  60, 16
+END
+
+/* ------------------------------------------------------------------ */
+/* 詳細                                                                */
+/* ------------------------------------------------------------------ */
+IDD_DETAILS DIALOGEX 0, 0, 420, 300
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION |
+      WS_SYSMENU | WS_THICKFRAME
+CAPTION "Details"
+FONT 9, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    EDITTEXT            IDC_DT_TEXT, 8, 8, 404, 258,
+                        ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL |
+                        WS_VSCROLL | WS_HSCROLL
+    DEFPUSHBUTTON   "", IDOK,      352,274,  60, 16
+END
+
+/* ------------------------------------------------------------------ */
+/* 旧インスタンス整理 + リネーム (設計書 9.3)                           */
+/* ------------------------------------------------------------------ */
+IDD_CLEANUP DIALOGEX 0, 0, 420, 332
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Cleanup and rename"
+FONT 9, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    LTEXT           "", IDC_CU_TARGET,   8,  8, 404, 28, SS_NOPREFIX
+    LTEXT           "", IDC_CU_LBL1,     8, 40, 404,  9, SS_NOPREFIX
+    CONTROL         "", IDC_CU_LIST, WC_LISTVIEW,
+                        LVS_REPORT | LVS_SINGLESEL | WS_BORDER | WS_TABSTOP,
+                        8, 52, 404, 140
+    LTEXT           "", IDC_CU_LBL2,     8,200, 404,  9, SS_NOPREFIX
+    EDITTEXT            IDC_CU_NEWNAME,  8,211, 300, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "", IDC_CU_BASE,   314,211,  98, 14
+    LTEXT           "", IDC_CU_PLAN,     8,232, 404, 62, SS_NOPREFIX
+    DEFPUSHBUTTON   "", IDOK,          284,304,  60, 16
+    PUSHBUTTON      "", IDCANCEL,      348,304,  60, 16
+END

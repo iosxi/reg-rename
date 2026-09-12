@@ -1,0 +1,46 @@
+# 非 GUI スモークテスト用
+#   mingw32-make -f tests/Makefile.smoke
+#   build/smoke.exe            (読み取りのみ)
+#   build/smoke.exe --history  (履歴 JSON の書き込みも試す)
+
+CC      := gcc
+SRCDIR  := src
+OBJDIR  := build/objsmoke
+BINDIR  := build
+TARGET  := $(BINDIR)/smoke.exe
+
+SRCS := \
+	$(SRCDIR)/guids.c \
+	$(SRCDIR)/util.c \
+	$(SRCDIR)/devlist.c \
+	$(SRCDIR)/matching.c \
+	$(SRCDIR)/safety.c \
+	$(SRCDIR)/history.c \
+	tests/smoke.c
+
+OBJS := $(addprefix $(OBJDIR)/,$(notdir $(SRCS:.c=.o)))
+
+CFLAGS := -std=c99 -Wall -Wextra -Wno-unused-parameter -O1 \
+          -finput-charset=UTF-8 -DUNICODE -D_UNICODE \
+          -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 -DNTDDI_VERSION=0x0A000000 \
+          -I$(SRCDIR)
+LDLIBS := -lsetupapi -lcfgmgr32 -lole32 -loleaut32 -lpropsys -luuid \
+          -lshell32 -ladvapi32 -lcomctl32
+
+.PHONY: all clean
+all: $(TARGET)
+
+$(TARGET): $(OBJS)
+	$(CC) -mconsole -o $@ $(OBJS) $(LDLIBS)
+
+$(OBJDIR)/%.o: $(SRCDIR)/%.c $(SRCDIR)/dnm.h | $(OBJDIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/smoke.o: tests/smoke.c $(SRCDIR)/dnm.h | $(OBJDIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR):
+	@mkdir -p $(OBJDIR) 2>nul || md "$(subst /,\,$(OBJDIR))" 2>nul || exit 0
+
+clean:
+	@-rm -rf $(OBJDIR) $(TARGET) 2>nul || exit 0
