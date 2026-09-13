@@ -411,9 +411,15 @@ static void create_children(void)
     mk(L"BUTTON", L"接続中", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_CHK_PRESENT);
     mk(L"BUTTON", L"未接続", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_CHK_ABSENT);
     mk(L"BUTTON", L"システムデバイス", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_CHK_SYSTEM);
-    mk(L"STATIC", L"種別:", SS_CENTERIMAGE, IDC_LBL_FILTER);
+    /* ラベルに SS_CENTERIMAGE は使わない。
+     * 23H2 の環境で「種別」「検索」の文字に小さな四角が重なるという
+     * 報告があり、この 2 つだけが他のコントロールと違って
+     * SS_CENTERIMAGE を持っていた。SS_CENTERIMAGE は本来画像向けの
+     * スタイルなので、縦方向の中央揃えはこちらで y を計算して
+     * 行うことにした。SS_NOPREFIX は & をニーモニック扱いさせないため。 */
+    mk(L"STATIC", L"種別:", SS_LEFT | SS_NOPREFIX, IDC_LBL_FILTER);
     mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, IDC_CMB_KIND);
-    mk(L"STATIC", L"検索:", SS_CENTERIMAGE, IDC_LBL_SEARCH);
+    mk(L"STATIC", L"検索:", SS_LEFT | SS_NOPREFIX, IDC_LBL_SEARCH);
     mk(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, IDC_EDT_SEARCH);
 
     mk(L"BUTTON", L"名前を変更...", BS_PUSHBUTTON | WS_TABSTOP, IDC_BTN_RENAME);
@@ -521,10 +527,12 @@ static void layout(void)
         /* チェックボックスの四角と文字の間隔。SM_CXMENUCHECK は DPI に
          * 追従するが、下限を置かないと小さすぎる環境がある。 */
         int boxW = GetSystemMetrics(SM_CXMENUCHECK);
-        int cmbW, i, itemW = 0;
+        int cmbW, i, itemW = 0, labY;
         if (boxW < 16) boxW = 16;
 
         y = (g_toolbarH - g_ctrlH) / 2;
+        /* ラベルは自前で縦方向の中央に置く (SS_CENTERIMAGE を使わないため) */
+        labY = y + (g_ctrlH - g_textH) / 2;
         x = 8;
 
         MOVE(IDC_BTN_REFRESH, x, y, ctrl_width(IDC_BTN_REFRESH, 28), g_ctrlH);
@@ -539,7 +547,7 @@ static void layout(void)
         MOVE(IDC_CHK_SYSTEM, x, y, ctrl_width(IDC_CHK_SYSTEM, boxW + 10), g_ctrlH);
         x += ctrl_width(IDC_CHK_SYSTEM, boxW + 10) + GAP * 2;
 
-        MOVE(IDC_LBL_FILTER, x, y, ctrl_width(IDC_LBL_FILTER, 6), g_ctrlH);
+        MOVE(IDC_LBL_FILTER, x, labY, ctrl_width(IDC_LBL_FILTER, 6), g_textH);
         x += ctrl_width(IDC_LBL_FILTER, 6) + 4;
 
         /* コンボは一番長い項目が収まる幅にする */
@@ -552,7 +560,7 @@ static void layout(void)
         MOVE(IDC_CMB_KIND, x, y, cmbW, g_ctrlH + 200);
         x += cmbW + GAP * 2;
 
-        MOVE(IDC_LBL_SEARCH, x, y, ctrl_width(IDC_LBL_SEARCH, 6), g_ctrlH);
+        MOVE(IDC_LBL_SEARCH, x, labY, ctrl_width(IDC_LBL_SEARCH, 6), g_textH);
         x += ctrl_width(IDC_LBL_SEARCH, 6) + 4;
 
         MOVE(IDC_EDT_SEARCH, x, y, (w - x - 8 > 120 ? w - x - 8 : 120), g_ctrlH);
