@@ -176,9 +176,18 @@ static void cmd_remove(void)
     dnm_strcpy(keep, MAX_DEVICE_ID_LEN, g_devices.items[idx].instanceId);
     if (dnm_dlg_remove_confirm(g_hMain, &g_devices.items[idx])) {
         OpResult res;
+        WCHAR body[2048];
         dnm_remove_device(&g_devices.items[idx], &res);
         dnm_history_log_remove(&g_devices.items[idx], &res);
-        MessageBoxW(g_hMain, res.message, L"デバイスを削除",
+        /* 書き出したバックアップのパスも添える (本人の指定) */
+        if (res.backupInfo[0])
+            _snwprintf(body, 2048,
+                       L"%s\n\n--- 削除前のレジストリを書き出しました ---\n%s",
+                       res.message, res.backupInfo);
+        else
+            dnm_strcpy(body, 2048, res.message);
+        body[2047] = 0;
+        MessageBoxW(g_hMain, body, L"デバイスを削除",
                     MB_OK | (res.code == OPR_OK ? MB_ICONINFORMATION : MB_ICONWARNING));
         reload_devices();
         select_by_instance_id(keep);
@@ -271,6 +280,7 @@ static void show_context_menu(int x, int y)
     if (idx < 0) {
         menu = CreatePopupMenu();
         AppendMenuW(menu, MF_STRING, IDM_CTX_PRIVINFO, L"権限の診断(&P)...");
+        AppendMenuW(menu, MF_STRING, IDM_CTX_SETTINGS, L"設定(&S)...");
         TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
                        x, y, 0, g_hMain, NULL);
         DestroyMenu(menu);
@@ -289,6 +299,7 @@ static void show_context_menu(int x, int y)
     AppendMenuW(menu, MF_STRING, IDM_CTX_COPYID,  L"Instance ID をコピー(&Y)");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, IDM_CTX_PRIVINFO, L"権限の診断(&P)...");
+    AppendMenuW(menu, MF_STRING, IDM_CTX_SETTINGS, L"設定(&S)...");
 
     TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
                    x, y, 0, g_hMain, NULL);
@@ -388,6 +399,7 @@ static void create_children(void)
     mk(L"BUTTON", L"デバイスを削除...", BS_PUSHBUTTON | WS_TABSTOP, IDC_BTN_REMOVE);
     mk(L"BUTTON", L"詳細...", BS_PUSHBUTTON | WS_TABSTOP, IDC_BTN_DETAILS);
     mk(L"BUTTON", L"再スキャン", BS_PUSHBUTTON | WS_TABSTOP, IDC_BTN_RESCAN);
+    mk(L"BUTTON", L"設定...", BS_PUSHBUTTON | WS_TABSTOP, IDC_BTN_SETTINGS);
 
     for (i = 0; i < (int)(sizeof(kKindItems) / sizeof(kKindItems[0])); i++)
         SendDlgItemMessageW(g_hMain, IDC_CMB_KIND, CB_ADDSTRING, 0,
@@ -446,7 +458,7 @@ static int min_client_width(void)
 {
     static const int kBtns[] = {
         IDC_BTN_RENAME, IDC_BTN_CLEANUP, IDC_BTN_REMOVE,
-        IDC_BTN_DETAILS, IDC_BTN_RESCAN
+        IDC_BTN_DETAILS, IDC_BTN_RESCAN, IDC_BTN_SETTINGS
     };
     int i, total = 8 + 8;
     if (!g_hMain || !GetDlgItem(g_hMain, IDC_BTN_RENAME)) return 0;
@@ -532,7 +544,7 @@ static void layout(void)
     {
         static const int kBtns[] = {
             IDC_BTN_RENAME, IDC_BTN_CLEANUP, IDC_BTN_REMOVE,
-            IDC_BTN_DETAILS, IDC_BTN_RESCAN
+            IDC_BTN_DETAILS, IDC_BTN_RESCAN, IDC_BTN_SETTINGS
         };
         int i;
         y = h - statusH - g_buttonsH + (g_buttonsH - g_ctrlH) / 2;
@@ -594,6 +606,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_CTX_DETAILS: cmd_details(); return 0;
         case IDM_CTX_COPYID:  cmd_copy_id(); return 0;
         case IDM_CTX_PRIVINFO: cmd_privilege_info(); return 0;
+        case IDM_CTX_SETTINGS:
+        case IDC_BTN_SETTINGS: dnm_dlg_settings(g_hMain); return 0;
         case IDC_BTN_RESCAN:  cmd_rescan();  return 0;
 
         case IDC_CHK_PRESENT:

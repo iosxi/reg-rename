@@ -135,6 +135,38 @@ GNU make にはこの問題が無いので、MinGW 用 `Makefile` は日本語�
 | 削除 | デバイスインスタンス | `DiUninstallDevice` (newdev.dll から実行時取得)<br>取れなければ `SetupDiCallClassInstaller(DIF_REMOVE)` |
 | 再列挙 | — | `CM_Reenumerate_DevNode` |
 
+### 変更前のレジストリを書き出す
+
+名前の変更・デバイスの削除を行う**直前**に、対象のレジストリキーを `.reg` へ
+書き出す。書き出したファイルのフルパスは、実行後の結果画面に必ず出す。
+
+| 操作 | 書き出すキー |
+|---|---|
+| PnP デバイス名 | `HKLM\SYSTEM\CurrentControlSet\Enum\<Instance ID>` |
+| ネットワーク接続名 | `HKLM\SYSTEM\CurrentControlSet\Control\Network\{4D36E972-…}\{NetCfgInstanceId}\Connection` |
+| オーディオ endpoint 名 | `HKLM\SOFTWARE\…\MMDevices\Audio\{Render\|Capture}\{endpoint}` |
+| デバイスの削除 | `HKLM\SYSTEM\CurrentControlSet\Enum\<Instance ID>` |
+
+エクスポートは `reg.exe export` に任せている。`.reg` のテキスト形式は
+`REG_MULTI_SZ` の `hex(7)`、`REG_EXPAND_SZ` の `hex(2)`、既定値の `@=` 表記、
+UTF-16LE + BOM といった細かい決まりがあり、自前で組み立てて取り違えると
+「バックアップはあるのに戻せない」という最悪の壊れ方をする。`reg.exe` は
+どの Windows にも入っていて、出力はダブルクリックで戻せる。
+終了コードだけでは信用せず、ファイルが実際にできたかも確認している。
+
+バックアップ先は**設定画面**（メイン画面の「設定...」ボタン）で指定する。
+設定ファイルは**実行ファイルと同じフォルダ**の `DeviceNameManager.ini`。
+
+```ini
+[Backup]
+Enabled=1
+Dir=C:\path\to\backup
+```
+
+未設定なら `<exe のあるフォルダ>\RegBackup` を使う。書き出しに失敗しても
+操作自体は止めない。止めると、バックアップ先を設定していないだけで何も
+できなくなるため。代わりに失敗の理由を結果画面に必ず出す。
+
 ### ネットワーク接続名だけ経路が 2 つある理由
 
 設計書は `INetConnection::Rename` を想定していたが、**Windows 11 26200 では

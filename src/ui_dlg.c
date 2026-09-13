@@ -6,6 +6,7 @@
 #include "dnm.h"
 #include "resource.h"
 #include <mmdeviceapi.h>   /* DEVICE_STATE_* */
+#include <shlobj.h>        /* SHBrowseForFolderW (設定のフォルダ選択) */
 
 extern const WCHAR *dnm_multisz_next(const WCHAR *cur);
 
@@ -42,14 +43,26 @@ static const WCHAR *present_text(BOOL present)
     return present ? L"接続中" : L"未接続";
 }
 
-/* 結果コードに応じたアイコンで結果を見せる */
+/* 結果コードに応じたアイコンで結果を見せる。
+ * 書き出したバックアップのパスも必ず添える (本人の指定)。 */
 static void report(HWND parent, const WCHAR *title, const OpResult *res)
 {
     UINT icon = MB_ICONINFORMATION;
+    WCHAR body[2048];
+
     if (res->code == OPR_APPLIED_NOT_KEPT) icon = MB_ICONWARNING;
     else if (res->code == OPR_FAILED)      icon = MB_ICONERROR;
     else if (res->code == OPR_SKIPPED)     icon = MB_ICONWARNING;
-    MessageBoxW(parent, res->message, title, MB_OK | icon);
+
+    if (res->backupInfo[0])
+        _snwprintf(body, 2048,
+                   L"%s\n\n--- 変更前のレジストリを書き出しました ---\n%s",
+                   res->message, res->backupInfo);
+    else
+        dnm_strcpy(body, 2048, res->message);
+    body[2047] = 0;
+
+    MessageBoxW(parent, body, title, MB_OK | icon);
 }
 
 /* ------------------------------------------------------------------ */
@@ -82,12 +95,51 @@ static void append_line(WCHAR *buf, size_t cap, const WCHAR *line)
     dnm_strcpy(buf + wcslen(buf), cap - wcslen(buf), line);
 }
 
+/* 変更の直前にバックアップを書き出し、結果を out->backupInfo に積む。
+ * バックアップに失敗しても操作自体は止めない。止めると、バックアップ先を
+ * 設定していないだけで何もできなくなる。代わりに画面に必ず出す。 */
+static void backup_step(OpResult *out, const WCHAR *regPath,
+                        const WCHAR *tag, const WCHAR *label)
+{
+    WCHAR path[MAX_PATH], err[300], line[MAX_PATH + 80];
+
+    if (dnm_backup_reg_key(regPath, tag, label, path, MAX_PATH, err, 300))
+        _snwprintf(line, MAX_PATH + 80, L"  [%s] %s", tag, path);
+    else
+        _snwprintf(line, MAX_PATH + 80, L"  [%s] 書き出せませんでした: %s", tag, err);
+    line[MAX_PATH + 79] = 0;
+
+    append_line(out->backupInfo, 1024, line);
+}
+
 static void apply_rename_plan(const DeviceInfo *d, const RenamePlan *plan, OpResult *out)
 {
     OpResult r;
+    WCHAR regPath[600];
+
     ZeroMemory(out, sizeof(*out));
     out->code = OPR_OK;
     out->message[0] = 0;
+
+    /* --- 変更する項目それぞれについて、変更前のキーを書き出す ---------- */
+    if (plan->renamePnp) {
+        dnm_regpath_pnp(d->instanceId, regPath, 600);
+        backup_step(out, regPath, L"pnp", d->instanceId);
+    }
+    if (plan->renameNet) {
+        dnm_regpath_netconn(&d->netConnGuid, regPath, 600);
+        backup_step(out, regPath, L"net", d->instanceId);
+    }
+    if (plan->renameAudioR && plan->audioRIndex >= 0) {
+        dnm_regpath_audio(d->audio[plan->audioRIndex].endpointId, 0, regPath, 600);
+        backup_step(out, regPath, L"audio_render",
+                    d->audio[plan->audioRIndex].endpointId);
+    }
+    if (plan->renameAudioC && plan->audioCIndex >= 0) {
+        dnm_regpath_audio(d->audio[plan->audioCIndex].endpointId, 1, regPath, 600);
+        backup_step(out, regPath, L"audio_capture",
+                    d->audio[plan->audioCIndex].endpointId);
+    }
 
     if (plan->renamePnp) {
         dnm_rename_pnp(d, plan->pnpName, &r);
@@ -315,11 +367,18 @@ static void rename_init(HWND dlg, RenameCtx *ctx)
         set_text(dlg, IDC_RN_EDIT_A, d->netAlias);
         show_ctl(dlg, IDC_RN_LBL_B, FALSE);
         show_ctl(dlg, IDC_RN_EDIT_B, FALSE);
+        /* この欄は説明であって、エラー表示ではない。
+         * 以前は「既存の接続と同じ名前にするには先に旧アダプターを削除して
+         * ください」とだけ書いてあり、いま何か問題が起きているという
+         * 診断文に見えると指摘を受けた。注意書きだと分かる書き方にする。
+         * 実際の重複は適用時に検出してエラーとして出す。 */
         set_text(dlg, IDC_RN_HINT,
                  L"PnP デバイス名 (アダプターの製品名) と、ネットワーク接続一覧に\n"
                  L"出る接続名は別物です。「Ethernet 2」のような名前は後者です。\n\n"
-                 L"接続名は同時に同じ名前を 2 つ持てません。既存の接続と同じ名前に\n"
-                 L"するには、先に旧アダプターを削除してください。");
+                 L"[注意書き] 以下は一般的な説明で、いま問題が起きているという\n"
+                 L"意味ではありません。接続名は重複できないため、他の接続が使って\n"
+                 L"いる名前を指定すると、適用したときにエラーになります。その場合は\n"
+                 L"先に旧アダプターを削除してください。");
     } else {
         show_ctl(dlg, IDC_RN_LBL_A, FALSE);
         show_ctl(dlg, IDC_RN_EDIT_A, FALSE);
@@ -918,6 +977,126 @@ static INT_PTR CALLBACK cleanup_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         break;
     }
     return FALSE;
+}
+
+/* ------------------------------------------------------------------ */
+/* 設定 (バックアップ先の指定)                                         */
+/*                                                                     */
+/* 設定ファイルは実行ファイルと同じフォルダに置く (本人の指定)。        */
+/* 置き場所を画面に出しておく。Program Files 配下に置いた場合は書けない  */
+/* ことがあり、そのときは保存時に分かるようにする。                     */
+/* ------------------------------------------------------------------ */
+static int CALLBACK browse_init(HWND dlg, UINT msg, LPARAM lp, LPARAM data)
+{
+    /* 現在の設定値を初期選択にする */
+    if (msg == BFFM_INITIALIZED && data)
+        SendMessageW(dlg, BFFM_SETSELECTIONW, TRUE, data);
+    return 0;
+}
+
+static void settings_browse(HWND dlg)
+{
+    BROWSEINFOW bi;
+    LPITEMIDLIST idl;
+    WCHAR cur[MAX_PATH], picked[MAX_PATH];
+
+    get_text(dlg, IDC_ST_EDIT_DIR, cur, MAX_PATH);
+
+    ZeroMemory(&bi, sizeof(bi));
+    bi.hwndOwner = dlg;
+    bi.lpszTitle = L"バックアップ先のフォルダを選んでください";
+    bi.ulFlags   = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    bi.lpfn      = browse_init;
+    bi.lParam    = (LPARAM)cur;
+
+    idl = SHBrowseForFolderW(&bi);
+    if (!idl) return;
+    if (SHGetPathFromIDListW(idl, picked))
+        set_text(dlg, IDC_ST_EDIT_DIR, picked);
+    CoTaskMemFree(idl);
+}
+
+static INT_PTR CALLBACK settings_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_INITDIALOG: {
+        Config c;
+        WCHAR ini[MAX_PATH], buf[MAX_PATH + 120], def[MAX_PATH];
+
+        dnm_config_load(&c);
+        dnm_config_path(ini, MAX_PATH);
+        dnm_default_backup_dir(def, MAX_PATH);
+
+        SetWindowTextW(dlg, L"設定");
+        set_text(dlg, IDC_ST_CHK_ENABLE,
+                 L"名前の変更・デバイスの削除の直前に、対象のレジストリキーを書き出す");
+        CheckDlgButton(dlg, IDC_ST_CHK_ENABLE,
+                       c.backupEnabled ? BST_CHECKED : BST_UNCHECKED);
+
+        set_text(dlg, IDC_ST_LBL_DIR, L"バックアップ先フォルダ:");
+        set_text(dlg, IDC_ST_EDIT_DIR, c.backupDir);
+        set_text(dlg, IDC_ST_BROWSE, L"参照...");
+
+        _snwprintf(buf, MAX_PATH + 120, L"設定ファイル: %s", ini);
+        buf[MAX_PATH + 119] = 0;
+        set_text(dlg, IDC_ST_LBL_INI, buf);
+
+        _snwprintf(buf, MAX_PATH + 120,
+                   L"空欄にすると既定値 (%s) を使います。\n"
+                   L"フォルダが無ければ書き出すときに作ります。\n"
+                   L"書き出したファイルのパスは、実行後の画面に表示します。", def);
+        buf[MAX_PATH + 119] = 0;
+        set_text(dlg, IDC_ST_HINT, buf);
+
+        set_text(dlg, IDOK, L"保存");
+        set_text(dlg, IDCANCEL, L"キャンセル");
+        return TRUE;
+    }
+
+    case WM_COMMAND:
+        switch (LOWORD(wp)) {
+        case IDC_ST_BROWSE:
+            settings_browse(dlg);
+            return TRUE;
+
+        case IDOK: {
+            Config c;
+            ZeroMemory(&c, sizeof(c));
+            c.backupEnabled =
+                (IsDlgButtonChecked(dlg, IDC_ST_CHK_ENABLE) == BST_CHECKED);
+            get_text(dlg, IDC_ST_EDIT_DIR, c.backupDir, MAX_PATH);
+            trim(c.backupDir);
+            if (c.backupDir[0] == 0)
+                dnm_default_backup_dir(c.backupDir, MAX_PATH);
+
+            if (!dnm_config_save(&c)) {
+                WCHAR ini[MAX_PATH], m[MAX_PATH + 200];
+                dnm_config_path(ini, MAX_PATH);
+                _snwprintf(m, MAX_PATH + 200,
+                           L"設定ファイルに書き込めませんでした。\n\n%s\n\n"
+                           L"実行ファイルを書き込めない場所 (Program Files など) に\n"
+                           L"置いている場合、別のフォルダへ移すと保存できます。", ini);
+                m[MAX_PATH + 199] = 0;
+                MessageBoxW(dlg, m, L"設定", MB_OK | MB_ICONWARNING);
+                return TRUE;
+            }
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+
+        case IDCANCEL:
+            EndDialog(dlg, IDCANCEL);
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+void dnm_dlg_settings(HWND parent)
+{
+    DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_SETTINGS), parent,
+                    settings_proc, 0);
 }
 
 BOOL dnm_dlg_cleanup(HWND parent, DeviceList *list, int targetIndex)

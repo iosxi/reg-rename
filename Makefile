@@ -20,6 +20,8 @@ SRCS := \
 	$(SRCDIR)/matching.c \
 	$(SRCDIR)/safety.c \
 	$(SRCDIR)/history.c \
+	$(SRCDIR)/config.c \
+	$(SRCDIR)/backup.c \
 	$(SRCDIR)/ui_dlg.c \
 	$(SRCDIR)/ui_main.c
 

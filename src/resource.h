@@ -20,6 +20,7 @@
 #define IDC_STATUSBAR           1012
 #define IDC_LBL_FILTER          1013
 #define IDC_LBL_SEARCH          1014
+#define IDC_BTN_SETTINGS        1015
 
 /* コンテキストメニュー (設計書 9.1) */
 #define IDM_CTX_RENAME          1100
@@ -28,6 +29,16 @@
 #define IDM_CTX_DETAILS         1103
 #define IDM_CTX_COPYID          1104
 #define IDM_CTX_PRIVINFO        1105
+#define IDM_CTX_SETTINGS        1106
+
+/* 設定ダイアログ (バックアップ先の指定) */
+#define IDD_SETTINGS            204
+#define IDC_ST_LBL_DIR          2400
+#define IDC_ST_EDIT_DIR         2401
+#define IDC_ST_BROWSE           2402
+#define IDC_ST_CHK_ENABLE       2403
+#define IDC_ST_HINT             2404
+#define IDC_ST_LBL_INI          2405
 
 /* 名前を変更ダイアログ (設計書 3.2 / 7.2) */
 #define IDD_RENAME              200

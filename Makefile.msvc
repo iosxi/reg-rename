@@ -51,10 +51,12 @@ LDFLAGS_CONSOLE = /nologo /SUBSYSTEM:CONSOLE /MANIFEST:NO
 
 OBJS = $(OBJDIR)\guids.obj $(OBJDIR)\util.obj $(OBJDIR)\devlist.obj \
        $(OBJDIR)\devops.obj $(OBJDIR)\matching.obj $(OBJDIR)\safety.obj \
-       $(OBJDIR)\history.obj $(OBJDIR)\ui_dlg.obj $(OBJDIR)\ui_main.obj
+       $(OBJDIR)\history.obj $(OBJDIR)\config.obj $(OBJDIR)\backup.obj \
+       $(OBJDIR)\ui_dlg.obj $(OBJDIR)\ui_main.obj
 
 SMOKEOBJS = $(OBJDIR)\guids.obj $(OBJDIR)\util.obj $(OBJDIR)\devlist.obj \
             $(OBJDIR)\matching.obj $(OBJDIR)\safety.obj $(OBJDIR)\history.obj \
+            $(OBJDIR)\config.obj $(OBJDIR)\backup.obj \
             $(OBJDIR)\smoke.obj
 
 all: $(TARGET)

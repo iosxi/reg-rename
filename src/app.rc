@@ -86,6 +86,24 @@ BEGIN
 END
 
 /* ------------------------------------------------------------------ */
+/* 設定 (バックアップ先の指定)                                         */
+/* ------------------------------------------------------------------ */
+IDD_SETTINGS DIALOGEX 0, 0, 380, 150
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Settings"
+FONT 9, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    AUTOCHECKBOX    "", IDC_ST_CHK_ENABLE, 10,  10, 360, 12
+    LTEXT           "", IDC_ST_LBL_DIR,    10,  30, 360,  9, SS_NOPREFIX
+    EDITTEXT            IDC_ST_EDIT_DIR,   10,  41, 290, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "", IDC_ST_BROWSE,    306,  41,  64, 14
+    LTEXT           "", IDC_ST_LBL_INI,    10,  62, 360, 18, SS_NOPREFIX | SS_ENDELLIPSIS
+    LTEXT           "", IDC_ST_HINT,       10,  84, 360, 36, SS_NOPREFIX
+    DEFPUSHBUTTON   "", IDOK,             246, 128,  60, 16
+    PUSHBUTTON      "", IDCANCEL,         310, 128,  60, 16
+END
+
+/* ------------------------------------------------------------------ */
 /* 旧インスタンス整理 + リネーム (設計書 9.3)                           */
 /* ------------------------------------------------------------------ */
 IDD_CLEANUP DIALOGEX 0, 0, 420, 332

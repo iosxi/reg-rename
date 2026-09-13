@@ -139,6 +139,9 @@ typedef struct {
     HRESULT      hr;
     WCHAR        message[512];
     WCHAR        actualName[DNM_MAX_NAME]; /* 再列挙後に実際に取れた名前 */
+    /* 操作の直前に書き出したバックアップ .reg のフルパス (改行区切り)。
+     * 結果ダイアログにそのまま出す。 */
+    WCHAR        backupInfo[1024];
 } OpResult;
 
 /* 実行中プロセスの権限。TokenIsElevated だけだと
@@ -161,6 +164,20 @@ typedef struct {
     int enableLua;
     int consentPromptBehaviorAdmin;
 } UacPolicy;
+
+/* 設定 (実行ファイルと同じフォルダの DeviceNameManager.ini) */
+typedef struct {
+    BOOL  backupEnabled;
+    WCHAR backupDir[MAX_PATH];
+} Config;
+
+/* 接続名を今いくつ持っているのはどのアダプターか */
+typedef struct {
+    BOOL  found;
+    WCHAR guid[64];              /* NetCfgInstanceId */
+    WCHAR adapterDesc[DNM_MAX_NAME];   /* DriverDesc */
+    WCHAR instanceId[MAX_DEVICE_ID_LEN];
+} ConnNameOwner;
 
 /* ------------------------------------------------------------------ */
 /* util.c                                                              */
@@ -190,6 +207,25 @@ BOOL  dnm_enable_privilege(const WCHAR *name);
 void  dnm_guess_base_name(const WCHAR *current, WCHAR *out, size_t cap);
 
 /* ------------------------------------------------------------------ */
+/* config.c                                                            */
+/* ------------------------------------------------------------------ */
+void dnm_exe_dir(WCHAR *buf, size_t cap);
+void dnm_config_path(WCHAR *buf, size_t cap);
+void dnm_default_backup_dir(WCHAR *buf, size_t cap);
+void dnm_config_load(Config *c);
+BOOL dnm_config_save(const Config *c);
+
+/* ------------------------------------------------------------------ */
+/* backup.c                                                            */
+/* ------------------------------------------------------------------ */
+void dnm_regpath_pnp(const WCHAR *instanceId, WCHAR *buf, size_t cap);
+void dnm_regpath_netconn(const GUID *netCfgInstanceId, WCHAR *buf, size_t cap);
+void dnm_regpath_audio(const WCHAR *endpointId, int flow, WCHAR *buf, size_t cap);
+/* 変更の直前に呼ぶ。書き出せたら TRUE と outPath にフルパスを返す。 */
+BOOL dnm_backup_reg_key(const WCHAR *regPath, const WCHAR *tag, const WCHAR *label,
+                        WCHAR *outPath, size_t outCap, WCHAR *errOut, size_t errCap);
+
+/* ------------------------------------------------------------------ */
 /* devlist.c                                                           */
 /* ------------------------------------------------------------------ */
 BOOL dnm_enumerate(DeviceList *out);
@@ -201,6 +237,9 @@ BOOL dnm_refetch(const WCHAR *instanceId, DeviceInfo *out);
 /* devops.c                                                            */
 /* ------------------------------------------------------------------ */
 void dnm_rescan_devices(void);
+/* 接続名を今持っているアダプターを探す。exclude は自分自身の除外用 (NULL 可) */
+void dnm_find_conn_name_owner(const WCHAR *name, const GUID *exclude,
+                              ConnNameOwner *out);
 void dnm_rename_pnp(const DeviceInfo *d, const WCHAR *newName, OpResult *res);
 void dnm_rename_audio_endpoint(const WCHAR *endpointId, const WCHAR *newName, OpResult *res);
 void dnm_rename_net_alias(const DeviceInfo *d, const WCHAR *newName, OpResult *res);
@@ -244,6 +283,7 @@ BOOL dnm_dlg_rename(HWND parent, DeviceInfo *d);
 BOOL dnm_dlg_remove_confirm(HWND parent, const DeviceInfo *d);
 void dnm_dlg_details(HWND parent, const DeviceInfo *d);
 BOOL dnm_dlg_cleanup(HWND parent, DeviceList *list, int targetIndex);
+void dnm_dlg_settings(HWND parent);
 
 /* ui_main.c が公開するもの */
 extern HINSTANCE g_hInst;

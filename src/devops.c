@@ -78,6 +78,118 @@ static BOOL get_nci(PFN_NciGetConnectionName *getFn, PFN_NciSetConnectionName *s
     return (g != NULL && s != NULL);
 }
 
+/* ------------------------------------------------------------------ */
+/* 接続名を今持っているのは誰か (設計書 8.2 の補強)                     */
+/*                                                                     */
+/* 「その名前はすでに使われています」とだけ言われても、どのアダプターが  */
+/* 押さえているのか分からない。実測では、押さえているのが「未接続の旧    */
+/* アダプター」であることが多く、一覧にも別名が出ないため辿りようがない。*/
+/*                                                                     */
+/* レジストリから引く。非管理者でも読めて、未接続のアダプターも入る      */
+/* (実測で確認)。                                                       */
+/*   Control\Network\{class}\{guid}\Connection\Name  ... 接続名          */
+/*   Control\Class\{class}\NNNN\NetCfgInstanceId     ... 対応する GUID   */
+/*   同キーの DriverDesc / DeviceInstanceID          ... アダプターの正体 */
+/* ------------------------------------------------------------------ */
+#define DNM_NET_CLASS_GUID_STR L"{4D36E972-E325-11CE-BFC1-08002BE10318}"
+
+static BOOL reg_read_str(HKEY root, const WCHAR *sub, const WCHAR *value,
+                         WCHAR *buf, DWORD cchCap)
+{
+    HKEY k = NULL;
+    DWORD cb = cchCap * sizeof(WCHAR), type = 0;
+    BOOL ok = FALSE;
+
+    buf[0] = 0;
+    if (RegOpenKeyExW(root, sub, 0, KEY_READ, &k) != ERROR_SUCCESS) return FALSE;
+    if (RegQueryValueExW(k, value, NULL, &type, (LPBYTE)buf, &cb) == ERROR_SUCCESS &&
+        (type == REG_SZ || type == REG_EXPAND_SZ)) {
+        buf[cchCap - 1] = 0;
+        ok = TRUE;
+    }
+    RegCloseKey(k);
+    return ok;
+}
+
+/* guid から Control\Class 配下を引いて、アダプターの正体を埋める */
+static void fill_adapter_from_guid(ConnNameOwner *out)
+{
+    HKEY cls = NULL;
+    DWORD i;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+            L"SYSTEM\\CurrentControlSet\\Control\\Class\\" DNM_NET_CLASS_GUID_STR,
+            0, KEY_READ, &cls) != ERROR_SUCCESS)
+        return;
+
+    for (i = 0;; i++) {
+        WCHAR sub[64], path[256], val[DNM_MAX_NAME];
+        DWORD cch = 64;
+
+        if (RegEnumKeyExW(cls, i, sub, &cch, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            break;
+
+        _snwprintf(path, 256,
+                   L"SYSTEM\\CurrentControlSet\\Control\\Class\\"
+                   DNM_NET_CLASS_GUID_STR L"\\%s", sub);
+        path[255] = 0;
+
+        if (!reg_read_str(HKEY_LOCAL_MACHINE, path, L"NetCfgInstanceId",
+                          val, DNM_MAX_NAME))
+            continue;
+        if (_wcsicmp(val, out->guid) != 0) continue;
+
+        reg_read_str(HKEY_LOCAL_MACHINE, path, L"DriverDesc",
+                     out->adapterDesc, DNM_MAX_NAME);
+        reg_read_str(HKEY_LOCAL_MACHINE, path, L"DeviceInstanceID",
+                     out->instanceId, MAX_DEVICE_ID_LEN);
+        break;
+    }
+    RegCloseKey(cls);
+}
+
+void dnm_find_conn_name_owner(const WCHAR *name, const GUID *exclude,
+                              ConnNameOwner *out)
+{
+    HKEY net = NULL;
+    DWORD i;
+    WCHAR excludeStr[64];
+
+    ZeroMemory(out, sizeof(*out));
+    excludeStr[0] = 0;
+    if (exclude) dnm_guid_to_string(exclude, excludeStr, 64);
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+            L"SYSTEM\\CurrentControlSet\\Control\\Network\\" DNM_NET_CLASS_GUID_STR,
+            0, KEY_READ, &net) != ERROR_SUCCESS)
+        return;
+
+    for (i = 0;; i++) {
+        WCHAR sub[64], path[256], val[DNM_MAX_NAME];
+        DWORD cch = 64;
+
+        if (RegEnumKeyExW(net, i, sub, &cch, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            break;
+        if (sub[0] != L'{') continue;
+        if (excludeStr[0] && _wcsicmp(sub, excludeStr) == 0) continue;
+
+        _snwprintf(path, 256,
+                   L"SYSTEM\\CurrentControlSet\\Control\\Network\\"
+                   DNM_NET_CLASS_GUID_STR L"\\%s\\Connection", sub);
+        path[255] = 0;
+
+        if (!reg_read_str(HKEY_LOCAL_MACHINE, path, L"Name", val, DNM_MAX_NAME))
+            continue;
+        if (_wcsicmp(val, name) != 0) continue;
+
+        out->found = TRUE;
+        dnm_strcpy(out->guid, 64, sub);
+        fill_adapter_from_guid(out);
+        break;
+    }
+    RegCloseKey(net);
+}
+
 /* HRESULT を Win32 エラーに戻す。FACILITY_WIN32 の HRESULT
  * (0x8007xxxx) だけが対象で、それ以外は元の値をそのまま返せないので
  * 判定用に ERROR_INVALID_FUNCTION を返す。呼び手は生の HRESULT も持つ。 */
@@ -410,11 +522,35 @@ void dnm_rename_net_alias(const DeviceInfo *d, const WCHAR *newName, OpResult *r
         if (nciRc == ERROR_ALREADY_EXISTS || nciRc == ERROR_DUP_NAME ||
             ncHr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) ||
             ncHr == HRESULT_FROM_WIN32(ERROR_DUP_NAME)) {
+            /* 誰が押さえているのかまで出す。「旧アダプターを削除して」とだけ
+             * 言われても、どれが旧アダプターなのか画面から分からない。
+             * 押さえているのが未接続のアダプターだと一覧に別名も出ない。 */
+            ConnNameOwner own;
+            dnm_find_conn_name_owner(newName, &d->netConnGuid, &own);
+
             res->code = OPR_FAILED;
             res->win32Error = nciRc;
-            _snwprintf(res->message, 512,
-                       L"「%s」はすでに他のネットワーク接続が使っています。\n"
-                       L"旧アダプターを先に削除してから再実行してください。", newName);
+            if (own.found) {
+                _snwprintf(res->message, 512,
+                    L"「%s」はすでに別のネットワークアダプターが使っています。\n\n"
+                    L"  アダプター : %s\n"
+                    L"  Instance ID: %s\n"
+                    L"  接続の GUID: %s\n\n"
+                    L"この名前を使うには、上のアダプターを先に削除するか、\n"
+                    L"そちらの接続名を別の名前に変えてください。\n"
+                    L"一覧に「%s」という PnP デバイス (SWD\\RADIO\\...) が出ている\n"
+                    L"場合、それは上のアダプターの無線ノードで、名前の持ち主\n"
+                    L"そのものではありません。消しても名前は空きません。",
+                    newName,
+                    own.adapterDesc[0] ? own.adapterDesc : L"(不明)",
+                    own.instanceId[0] ? own.instanceId : L"(不明)",
+                    own.guid, newName);
+            } else {
+                _snwprintf(res->message, 512,
+                    L"「%s」はすでに他のネットワーク接続が使っています。\n"
+                    L"ただし、その接続がどのアダプターのものかは特定できませんでした。\n"
+                    L"旧アダプターを先に削除してから再実行してください。", newName);
+            }
             res->message[511] = 0;
             return;
         }
@@ -547,6 +683,21 @@ void dnm_remove_device(const DeviceInfo *d, OpResult *res)
                    dnm_protect_reason_text(d->protect));
         res->message[511] = 0;
         return;
+    }
+
+    /* 削除の直前に、消える予定のキーを丸ごと書き出しておく。
+     * 削除は取り消せないので、ここは特に外せない。
+     * 書き出せなくても削除自体は止めない (理由は画面に出す)。 */
+    {
+        WCHAR regPath[600], path[MAX_PATH], err[300];
+        dnm_regpath_pnp(d->instanceId, regPath, 600);
+        if (dnm_backup_reg_key(regPath, L"remove", d->instanceId,
+                               path, MAX_PATH, err, 300))
+            _snwprintf(res->backupInfo, 1024, L"  [remove] %s", path);
+        else
+            _snwprintf(res->backupInfo, 1024,
+                       L"  [remove] 書き出せませんでした: %s", err);
+        res->backupInfo[1023] = 0;
     }
 
     dnm_enable_privilege(SE_LOAD_DRIVER_NAME);

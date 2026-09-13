@@ -16,6 +16,8 @@ SRCS := \
 	$(SRCDIR)/matching.c \
 	$(SRCDIR)/safety.c \
 	$(SRCDIR)/history.c \
+	$(SRCDIR)/config.c \
+	$(SRCDIR)/backup.c \
 	tests/smoke.c
 
 OBJS := $(addprefix $(OBJDIR)/,$(notdir $(SRCS:.c=.o)))
