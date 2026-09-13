@@ -125,6 +125,14 @@ typedef struct {
     WCHAR search[128];
 } EnumOptions;
 
+/* 接続名を今いくつ持っているのはどのアダプターか */
+typedef struct {
+    BOOL  found;
+    WCHAR guid[64];              /* NetCfgInstanceId */
+    WCHAR adapterDesc[DNM_MAX_NAME];   /* DriverDesc */
+    WCHAR instanceId[MAX_DEVICE_ID_LEN];
+} ConnNameOwner;
+
 /* 操作結果 (設計書 21 章: API 成功と実表示維持を別々に判定する) */
 typedef enum {
     OPR_OK = 0,             /* API 成功 + 再列挙後も期待どおり */
@@ -137,11 +145,16 @@ typedef struct {
     OpResultCode code;
     DWORD        win32Error;
     HRESULT      hr;
-    WCHAR        message[512];
+    /* 旧アダプターを消して再実行する経路が増えたぶん、結果が長くなる。
+     * 512 だと 1 回目の失敗だけで埋まって、その後の経過が消える。 */
+    WCHAR        message[1024];
     WCHAR        actualName[DNM_MAX_NAME]; /* 再列挙後に実際に取れた名前 */
     /* 操作の直前に書き出したバックアップ .reg のフルパス (改行区切り)。
      * 結果ダイアログにそのまま出す。 */
     WCHAR        backupInfo[1024];
+    /* 接続名が既に使われていて失敗した場合。UI 側が確認画面を出すために使う。 */
+    BOOL          nameConflict;
+    ConnNameOwner conflictOwner;
 } OpResult;
 
 /* 実行中プロセスの権限。TokenIsElevated だけだと
@@ -170,14 +183,6 @@ typedef struct {
     BOOL  backupEnabled;
     WCHAR backupDir[MAX_PATH];
 } Config;
-
-/* 接続名を今いくつ持っているのはどのアダプターか */
-typedef struct {
-    BOOL  found;
-    WCHAR guid[64];              /* NetCfgInstanceId */
-    WCHAR adapterDesc[DNM_MAX_NAME];   /* DriverDesc */
-    WCHAR instanceId[MAX_DEVICE_ID_LEN];
-} ConnNameOwner;
 
 /* ------------------------------------------------------------------ */
 /* util.c                                                              */

@@ -86,6 +86,23 @@ BEGIN
 END
 
 /* ------------------------------------------------------------------ */
+/* 接続名の競合 (確認画面)                                             */
+/*                                                                     */
+/* エラーとして突き放さず、「旧アダプターを削除して続けるか」を選ばせる。*/
+/* ------------------------------------------------------------------ */
+IDD_CONFLICT DIALOGEX 0, 0, 380, 210
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Connection name in use"
+FONT 9, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    EDITTEXT            IDC_CF_TEXT, 10, 10, 360, 164,
+                        ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL |
+                        WS_VSCROLL | NOT WS_TABSTOP
+    PUSHBUTTON      "", IDOK,       218, 182, 90, 16
+    DEFPUSHBUTTON   "", IDCANCEL,   314, 182,  56, 16
+END
+
+/* ------------------------------------------------------------------ */
 /* 設定 (バックアップ先の指定)                                         */
 /* ------------------------------------------------------------------ */
 IDD_SETTINGS DIALOGEX 0, 0, 380, 150

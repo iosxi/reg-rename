@@ -31,6 +31,10 @@
 #define IDM_CTX_PRIVINFO        1105
 #define IDM_CTX_SETTINGS        1106
 
+/* 接続名の競合を伝える確認ダイアログ */
+#define IDD_CONFLICT            205
+#define IDC_CF_TEXT             2500
+
 /* 設定ダイアログ (バックアップ先の指定) */
 #define IDD_SETTINGS            204
 #define IDC_ST_LBL_DIR          2400

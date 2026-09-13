@@ -48,19 +48,19 @@ static const WCHAR *present_text(BOOL present)
 static void report(HWND parent, const WCHAR *title, const OpResult *res)
 {
     UINT icon = MB_ICONINFORMATION;
-    WCHAR body[2048];
+    WCHAR body[4096];
 
     if (res->code == OPR_APPLIED_NOT_KEPT) icon = MB_ICONWARNING;
     else if (res->code == OPR_FAILED)      icon = MB_ICONERROR;
     else if (res->code == OPR_SKIPPED)     icon = MB_ICONWARNING;
 
     if (res->backupInfo[0])
-        _snwprintf(body, 2048,
+        _snwprintf(body, 4096,
                    L"%s\n\n--- 変更前のレジストリを書き出しました ---\n%s",
                    res->message, res->backupInfo);
     else
-        dnm_strcpy(body, 2048, res->message);
-    body[2047] = 0;
+        dnm_strcpy(body, 4096, res->message);
+    body[4095] = 0;
 
     MessageBoxW(parent, body, title, MB_OK | icon);
 }
@@ -112,7 +112,163 @@ static void backup_step(OpResult *out, const WCHAR *regPath,
     append_line(out->backupInfo, 1024, line);
 }
 
-static void apply_rename_plan(const DeviceInfo *d, const RenamePlan *plan, OpResult *out)
+/* ------------------------------------------------------------------ */
+/* 接続名の競合 → 確認画面                                             */
+/*                                                                     */
+/* 以前はエラーを出して終わりだったが、「旧アダプターを削除してから      */
+/* 再実行してください」と言われても手が止まるだけなので、その場で        */
+/* 削除して続けるかどうかを選ばせる。                                   */
+/* 削除の直前には dnm_remove_device が自分でバックアップを書き出す。     */
+/* ------------------------------------------------------------------ */
+static INT_PTR CALLBACK conflict_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    const WCHAR *text = (const WCHAR *)GetWindowLongPtrW(dlg, DWLP_USER);
+
+    switch (msg) {
+    case WM_INITDIALOG:
+        SetWindowLongPtrW(dlg, DWLP_USER, (LONG_PTR)lp);
+        SetWindowTextW(dlg, L"接続名が使われています");
+        set_text(dlg, IDC_CF_TEXT, (const WCHAR *)lp);
+        set_text(dlg, IDOK,     L"削除する");
+        set_text(dlg, IDCANCEL, L"キャンセル");
+        /* 既定はキャンセル側。削除は取り消せない。 */
+        SetFocus(GetDlgItem(dlg, IDCANCEL));
+        return FALSE;
+
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDOK)     { EndDialog(dlg, IDOK);     return TRUE; }
+        if (LOWORD(wp) == IDCANCEL) { EndDialog(dlg, IDCANCEL); return TRUE; }
+        break;
+    }
+    (void)text;
+    return FALSE;
+}
+
+static BOOL conflict_confirm(HWND parent, const WCHAR *newName,
+                             const ConnNameOwner *own, const DeviceInfo *old,
+                             BOOL oldFound)
+{
+    WCHAR text[2000];
+
+    _snwprintf(text, 2000,
+        L"接続名「%s」は、すでに別のネットワークアダプターが使っています。\r\n"
+        L"\r\n"
+        L"  アダプター : %s\r\n"
+        L"  Instance ID: %s\r\n"
+        L"  接続の GUID: %s\r\n"
+        L"  状態       : %s\r\n"
+        L"\r\n"
+        L"「削除する」を押すと、上のアダプターを削除してから、\r\n"
+        L"もう一度この名前への変更を試します。\r\n"
+        L"\r\n"
+        L"実行前に、次の 2 つのレジストリキーを書き出します。\r\n"
+        L"  1. 変更対象の接続キー (Connection)\r\n"
+        L"  2. 削除するアダプターのキー (Enum)\r\n"
+        L"書き出したファイルのパスは、完了後の画面に表示します。\r\n"
+        L"\r\n"
+        L"なお、一覧に「%s」という名前の PnP デバイス (SWD\\RADIO\\...) が\r\n"
+        L"出ている場合、それは上のアダプターの無線ノードであって、\r\n"
+        L"名前の持ち主そのものではありません。そちらを消しても名前は空きません。",
+        newName,
+        own->adapterDesc[0] ? own->adapterDesc : L"(不明)",
+        own->instanceId[0] ? own->instanceId : L"(不明)",
+        own->guid,
+        !oldFound ? L"デバイスとして見つかりません (削除できません)"
+                  : (old->isPresent ? L"接続中" : L"未接続"),
+        newName);
+    text[1999] = 0;
+
+    return DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_CONFLICT), parent,
+                           conflict_proc, (LPARAM)text) == IDOK;
+}
+
+/* 競合した旧アダプターを削除し、名前の変更をやり直す。
+ * 進行状況は msg へ積み、書き出したバックアップは backup へ足す。 */
+static void resolve_conflict_and_retry(HWND parent, const DeviceInfo *d,
+                                       const WCHAR *newName, OpResult *out,
+                                       OpResult *r)
+{
+    ConnNameOwner own = r->conflictOwner;
+    DeviceInfo old;
+    BOOL oldFound;
+
+    if (!own.found || own.instanceId[0] == 0) {
+        append_line(out->message, 1024,
+                    L"(競合相手を特定できないため、確認画面は出していません)");
+        return;
+    }
+
+    oldFound = dnm_refetch(own.instanceId, &old);
+
+    if (!conflict_confirm(parent, newName, &own, &old, oldFound)) {
+        if (oldFound) free(old.hardwareIds);
+        append_line(out->message, 1024, L"→ キャンセルしました。何も変更していません。");
+        return;
+    }
+
+    if (!oldFound) {
+        append_line(out->message, 1024,
+                    L"→ 競合相手をデバイスとして取得できず、削除できませんでした。");
+        return;
+    }
+
+    /* --- 1. 旧アダプターを削除 (この中でバックアップも書き出される) ---- */
+    {
+        OpResult rm;
+        dnm_remove_device(&old, &rm);
+        dnm_history_log_remove(&old, &rm);
+        free(old.hardwareIds);
+
+        if (rm.backupInfo[0]) append_line(out->backupInfo, 1024, rm.backupInfo);
+
+        append_line(out->message, 1024, L"");
+        append_line(out->message, 1024, L"[競合していたアダプターの削除]");
+        append_line(out->message, 1024, rm.message);
+
+        if (rm.code != OPR_OK) {
+            out->code = worse(out->code, rm.code);
+            append_line(out->message, 1024,
+                        L"→ 削除できなかったので、名前の変更はやり直していません。");
+            return;
+        }
+    }
+
+    /* --- 2. PnP の状態が落ち着くのを待って再列挙 --------------------- */
+    dnm_rescan_devices();
+    Sleep(800);
+
+    /* --- 3. 名前がまだ使われていないか、先に確かめる ------------------ */
+    {
+        ConnNameOwner again;
+        dnm_find_conn_name_owner(newName, &d->netConnGuid, &again);
+        if (again.found) {
+            out->code = worse(out->code, OPR_FAILED);
+            append_line(out->message, 1024, L"");
+            append_line(out->message, 1024,
+                L"[再確認] アダプターを削除しても、接続名はまだ使われたままです。");
+            append_line(out->message, 1024,
+                L"Windows が接続の登録を残しているため、再起動後に再実行してください。");
+            return;
+        }
+    }
+
+    /* --- 4. 名前の変更をやり直す ------------------------------------- */
+    {
+        OpResult r2;
+        dnm_rename_net_alias(d, newName, &r2);
+        dnm_history_log_rename(d, L"net_alias", d->netAlias, newName, &r2);
+        out->code = worse(out->code, r2.code);
+        append_line(out->message, 1024, L"");
+        append_line(out->message, 1024, L"[ネットワーク接続名 (やり直し)]");
+        append_line(out->message, 1024, r2.message);
+
+        /* やり直しが通ったなら、最初の失敗で付いた FAILED を引きずらない */
+        if (r2.code == OPR_OK) out->code = OPR_OK;
+    }
+}
+
+static void apply_rename_plan(HWND parent, const DeviceInfo *d,
+                              const RenamePlan *plan, OpResult *out)
 {
     OpResult r;
     WCHAR regPath[600];
@@ -145,16 +301,20 @@ static void apply_rename_plan(const DeviceInfo *d, const RenamePlan *plan, OpRes
         dnm_rename_pnp(d, plan->pnpName, &r);
         dnm_history_log_rename(d, L"pnp", d->friendlyName, plan->pnpName, &r);
         out->code = worse(out->code, r.code);
-        append_line(out->message, 512, L"[PnP デバイス名]");
-        append_line(out->message, 512, r.message);
+        append_line(out->message, 1024, L"[PnP デバイス名]");
+        append_line(out->message, 1024, r.message);
     }
     if (plan->renameNet) {
         dnm_rename_net_alias(d, plan->netName, &r);
         dnm_history_log_rename(d, L"net_alias", d->netAlias, plan->netName, &r);
         out->code = worse(out->code, r.code);
-        append_line(out->message, 512, L"");
-        append_line(out->message, 512, L"[ネットワーク接続名]");
-        append_line(out->message, 512, r.message);
+        append_line(out->message, 1024, L"");
+        append_line(out->message, 1024, L"[ネットワーク接続名]");
+        append_line(out->message, 1024, r.message);
+
+        /* 名前が埋まっていただけなら、確認画面を出して選ばせる */
+        if (r.nameConflict)
+            resolve_conflict_and_retry(parent, d, plan->netName, out, &r);
     }
     if (plan->renameAudioR && plan->audioRIndex >= 0) {
         dnm_rename_audio_endpoint(d->audio[plan->audioRIndex].endpointId,
@@ -163,9 +323,9 @@ static void apply_rename_plan(const DeviceInfo *d, const RenamePlan *plan, OpRes
                                d->audio[plan->audioRIndex].friendlyName,
                                plan->audioRName, &r);
         out->code = worse(out->code, r.code);
-        append_line(out->message, 512, L"");
-        append_line(out->message, 512, L"[オーディオ出力エンドポイント]");
-        append_line(out->message, 512, r.message);
+        append_line(out->message, 1024, L"");
+        append_line(out->message, 1024, L"[オーディオ出力エンドポイント]");
+        append_line(out->message, 1024, r.message);
     }
     if (plan->renameAudioC && plan->audioCIndex >= 0) {
         dnm_rename_audio_endpoint(d->audio[plan->audioCIndex].endpointId,
@@ -174,14 +334,14 @@ static void apply_rename_plan(const DeviceInfo *d, const RenamePlan *plan, OpRes
                                d->audio[plan->audioCIndex].friendlyName,
                                plan->audioCName, &r);
         out->code = worse(out->code, r.code);
-        append_line(out->message, 512, L"");
-        append_line(out->message, 512, L"[オーディオ入力エンドポイント]");
-        append_line(out->message, 512, r.message);
+        append_line(out->message, 1024, L"");
+        append_line(out->message, 1024, L"[オーディオ入力エンドポイント]");
+        append_line(out->message, 1024, r.message);
     }
 
     if (out->message[0] == 0) {
         out->code = OPR_SKIPPED;
-        dnm_strcpy(out->message, 512, L"変更する項目がありませんでした。");
+        dnm_strcpy(out->message, 1024, L"変更する項目がありませんでした。");
     }
 }
 
@@ -474,7 +634,7 @@ static INT_PTR CALLBACK rename_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 return TRUE;
             }
 
-            apply_rename_plan(d, &plan, &res);
+            apply_rename_plan(dlg, d, &plan, &res);
             report(dlg, L"名前を変更", &res);
             ctx->applied = TRUE;
             EndDialog(dlg, IDOK);
@@ -882,7 +1042,7 @@ static void cleanup_execute(HWND dlg, CleanupCtx *ctx)
             }
         }
 
-        apply_rename_plan(&target, &plan, &r);
+        apply_rename_plan(dlg, &target, &plan, &r);
         overall = worse(overall, r.code);
         append_line(summary, 2048, L"");
         append_line(summary, 2048, r.message);

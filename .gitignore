@@ -5,3 +5,7 @@ build/obj/nomanifest/
 # mingw32-make のレシピを cmd と取り違えて "2>nul" と書くと、リダイレクトに
 # ならず nul という空ファイルができる。作らないよう直してあるが、保険。
 nul
+
+# 実行時に exe の隣へ作られるもの。設定とバックアップの既定値がここになる。
+build/RegBackup/
+build/DeviceNameManager.ini

@@ -176,17 +176,17 @@ static void cmd_remove(void)
     dnm_strcpy(keep, MAX_DEVICE_ID_LEN, g_devices.items[idx].instanceId);
     if (dnm_dlg_remove_confirm(g_hMain, &g_devices.items[idx])) {
         OpResult res;
-        WCHAR body[2048];
+        WCHAR body[4096];
         dnm_remove_device(&g_devices.items[idx], &res);
         dnm_history_log_remove(&g_devices.items[idx], &res);
         /* 書き出したバックアップのパスも添える (本人の指定) */
         if (res.backupInfo[0])
-            _snwprintf(body, 2048,
+            _snwprintf(body, 4096,
                        L"%s\n\n--- 削除前のレジストリを書き出しました ---\n%s",
                        res.message, res.backupInfo);
         else
-            dnm_strcpy(body, 2048, res.message);
-        body[2047] = 0;
+            dnm_strcpy(body, 4096, res.message);
+        body[4095] = 0;
         MessageBoxW(g_hMain, body, L"デバイスを削除",
                     MB_OK | (res.code == OPR_OK ? MB_ICONINFORMATION : MB_ICONWARNING));
         reload_devices();

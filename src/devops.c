@@ -530,28 +530,26 @@ void dnm_rename_net_alias(const DeviceInfo *d, const WCHAR *newName, OpResult *r
 
             res->code = OPR_FAILED;
             res->win32Error = nciRc;
+            /* UI 側が確認画面を出せるように、競合であることと相手を渡す。 */
+            res->nameConflict  = TRUE;
+            res->conflictOwner = own;
             if (own.found) {
-                _snwprintf(res->message, 512,
+                _snwprintf(res->message, 1024,
                     L"「%s」はすでに別のネットワークアダプターが使っています。\n\n"
                     L"  アダプター : %s\n"
                     L"  Instance ID: %s\n"
-                    L"  接続の GUID: %s\n\n"
-                    L"この名前を使うには、上のアダプターを先に削除するか、\n"
-                    L"そちらの接続名を別の名前に変えてください。\n"
-                    L"一覧に「%s」という PnP デバイス (SWD\\RADIO\\...) が出ている\n"
-                    L"場合、それは上のアダプターの無線ノードで、名前の持ち主\n"
-                    L"そのものではありません。消しても名前は空きません。",
+                    L"  接続の GUID: %s",
                     newName,
                     own.adapterDesc[0] ? own.adapterDesc : L"(不明)",
                     own.instanceId[0] ? own.instanceId : L"(不明)",
-                    own.guid, newName);
+                    own.guid);
             } else {
-                _snwprintf(res->message, 512,
+                _snwprintf(res->message, 1024,
                     L"「%s」はすでに他のネットワーク接続が使っています。\n"
                     L"ただし、その接続がどのアダプターのものかは特定できませんでした。\n"
                     L"旧アダプターを先に削除してから再実行してください。", newName);
             }
-            res->message[511] = 0;
+            res->message[1023] = 0;
             return;
         }
 
