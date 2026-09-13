@@ -23,8 +23,6 @@ static int        *g_rowToIndex = NULL;
 static int         g_rowCount   = 0;
 
 #define TIMER_DEVCHANGE 1
-#define TOOLBAR_H  32
-#define BUTTONS_H  38
 
 static const WCHAR *kKindItems[] = {
     L"すべての種別", L"PnP", L"Audio", L"Net", L"USB",
@@ -116,10 +114,11 @@ static void refill_list(void)
     SendMessageW(g_hList, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(g_hList, NULL, TRUE);
 
-    dnm_status(L"%d 台中 %d 台を表示  |  %s",
-               g_devices.count, shown,
-               dnm_is_elevated() ? L"管理者権限で実行中"
-                                 : L"管理者権限ではありません (変更は失敗します)");
+    {
+        WCHAR priv[160];
+        dnm_elevation_status_text(priv, 160);
+        dnm_status(L"%d 台中 %d 台を表示  |  %s", g_devices.count, shown, priv);
+    }
 }
 
 static void reload_devices(void)
@@ -232,6 +231,24 @@ static void cmd_copy_id(void)
     }
 }
 
+/* 権限の診断。
+ * 「管理者権限で実行中」と出ているのが正しいかを、利用者自身が
+ * 確かめられるようにする。表示の根拠を全部並べる。 */
+static void cmd_privilege_info(void)
+{
+    WCHAR report[600];
+    WCHAR body[900];
+    dnm_privilege_report(report, 600);
+    _snwprintf(body, 900,
+               L"%s\n\n"
+               L"マニフェストが requireAdministrator なら、ダブルクリックで\n"
+               L"起動しても Windows が昇格させます。UAC の確認画面が出るか\n"
+               L"どうかは ConsentPromptBehaviorAdmin で決まります。",
+               report);
+    body[899] = 0;
+    MessageBoxW(g_hMain, body, L"権限の診断", MB_OK | MB_ICONINFORMATION);
+}
+
 static void cmd_rescan(void)
 {
     dnm_status(L"デバイスを再スキャンしています...");
@@ -247,7 +264,18 @@ static void show_context_menu(int x, int y)
 {
     HMENU menu;
     int idx = selected_index();
-    if (idx < 0) return;
+
+    /* 選択が無くても権限診断だけは出せるようにする。
+     * 「管理者権限で実行中」の表示が正しいかを確かめたいとき、
+     * デバイスを選ばせる必然性が無い。 */
+    if (idx < 0) {
+        menu = CreatePopupMenu();
+        AppendMenuW(menu, MF_STRING, IDM_CTX_PRIVINFO, L"権限の診断(&P)...");
+        TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
+                       x, y, 0, g_hMain, NULL);
+        DestroyMenu(menu);
+        return;
+    }
 
     menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, IDM_CTX_RENAME,  L"デバイス名を変更(&R)...");
@@ -259,10 +287,73 @@ static void show_context_menu(int x, int y)
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, IDM_CTX_DETAILS, L"詳細(&I)...");
     AppendMenuW(menu, MF_STRING, IDM_CTX_COPYID,  L"Instance ID をコピー(&Y)");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, IDM_CTX_PRIVINFO, L"権限の診断(&P)...");
 
     TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
                    x, y, 0, g_hMain, NULL);
     DestroyMenu(menu);
+}
+
+/* ------------------------------------------------------------------ */
+/* 文字の実測                                                          */
+/*                                                                     */
+/* フォントは SPI_GETNONCLIENTMETRICS から取るので、DPI や「テキストの   */
+/* サイズ」の設定で大きくなる。にもかかわらず座標と幅をピクセルで       */
+/* 決め打ちしていたため、フォントが大きい環境ではラベルが途切れ、       */
+/* ボタンの文字の下が切れ、隣のコントロールと重なっていた。            */
+/* 幅も高さも、表示する文字を実測してから決める。                      */
+/* ------------------------------------------------------------------ */
+static int g_textH   = 16;  /* 1 行の文字の高さ */
+static int g_ctrlH   = 26;  /* ボタン・入力欄の高さ */
+static int g_toolbarH = 32; /* 上段の占める高さ */
+static int g_buttonsH = 38; /* 下段の占める高さ */
+
+/* 文字列の描画幅 (ピクセル)。g_hFont で測る。 */
+static int text_width(const WCHAR *s)
+{
+    HDC dc = GetDC(g_hMain);
+    HFONT old = NULL;
+    SIZE sz;
+    int w = 0;
+
+    if (!dc) return (int)wcslen(s) * 12;
+    if (g_hFont) old = (HFONT)SelectObject(dc, g_hFont);
+    if (GetTextExtentPoint32W(dc, s, (int)wcslen(s), &sz)) w = sz.cx;
+    if (old) SelectObject(dc, old);
+    ReleaseDC(g_hMain, dc);
+    return w;
+}
+
+/* コントロールに入っている文字から必要幅を出す。
+ * pad は種類ごとの余白 (枠、チェックボックスの四角、コンボの矢印)。 */
+static int ctrl_width(int id, int pad)
+{
+    WCHAR buf[256];
+    buf[0] = 0;
+    GetDlgItemTextW(g_hMain, id, buf, 256);
+    return text_width(buf) + pad;
+}
+
+static void measure_metrics(void)
+{
+    HDC dc = GetDC(g_hMain);
+    TEXTMETRICW tm;
+    HFONT old = NULL;
+
+    if (dc) {
+        if (g_hFont) old = (HFONT)SelectObject(dc, g_hFont);
+        if (GetTextMetricsW(dc, &tm))
+            g_textH = tm.tmHeight;
+        if (old) SelectObject(dc, old);
+        ReleaseDC(g_hMain, dc);
+    }
+
+    /* 文字の高さ + 上下の余白。これを下回るとボタンの文字の下が切れる。 */
+    g_ctrlH    = g_textH + 12;
+    if (g_ctrlH < 24) g_ctrlH = 24;
+    g_toolbarH = g_ctrlH + 12;
+    g_buttonsH = g_ctrlH + 14;
 }
 
 /* ------------------------------------------------------------------ */
@@ -317,21 +408,27 @@ static void create_children(void)
     ListView_SetExtendedListViewStyle(g_hList,
         LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
 
-    ZeroMemory(&col, sizeof(col));
-    col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-    col.pszText = (LPWSTR)L"状態";       col.cx =  44; col.iSubItem = 0;
-    ListView_InsertColumn(g_hList, 0, &col);
-    col.pszText = (LPWSTR)L"表示名";     col.cx = 260; col.iSubItem = 1;
-    ListView_InsertColumn(g_hList, 1, &col);
-    col.pszText = (LPWSTR)L"種別";       col.cx =  80; col.iSubItem = 2;
-    ListView_InsertColumn(g_hList, 2, &col);
-    col.pszText = (LPWSTR)L"接続状態";   col.cx =  70; col.iSubItem = 3;
-    ListView_InsertColumn(g_hList, 3, &col);
-    col.pszText = (LPWSTR)L"別名 (接続名 / エンドポイント)";
-                                         col.cx = 220; col.iSubItem = 4;
-    ListView_InsertColumn(g_hList, 4, &col);
-    col.pszText = (LPWSTR)L"Instance ID"; col.cx = 380; col.iSubItem = 5;
-    ListView_InsertColumn(g_hList, 5, &col);
+    /* 列幅も決め打ちだと見出しが「状...」「接続状...」と欠ける。
+     * 見出しの実測幅を下限にして、そこに中身のぶんの余裕を足す。 */
+    {
+        static const WCHAR *kCols[] = {
+            L"状態", L"表示名", L"種別", L"接続状態",
+            L"別名 (接続名 / エンドポイント)", L"Instance ID"
+        };
+        static const int kMin[] = { 44, 260, 80, 70, 220, 380 };
+        int i;
+
+        ZeroMemory(&col, sizeof(col));
+        col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        for (i = 0; i < (int)(sizeof(kCols) / sizeof(kCols[0])); i++) {
+            /* ソートの矢印と余白のぶん 24px 足す */
+            int need = text_width(kCols[i]) + 24;
+            col.pszText  = (LPWSTR)kCols[i];
+            col.cx       = need > kMin[i] ? need : kMin[i];
+            col.iSubItem = i;
+            ListView_InsertColumn(g_hList, i, &col);
+        }
+    }
 
     g_hStatus = CreateWindowExW(0, STATUSCLASSNAMEW, L"",
                                 WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
@@ -340,10 +437,28 @@ static void create_children(void)
     if (g_hFont) SendMessageW(g_hStatus, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 }
 
+/* コントロール同士の間隔 */
+#define GAP 8
+
+/* 下段のボタンを全部並べるのに要る幅。ウィンドウの下限に使う。
+ * 上段は検索欄が伸縮するので、下段のほうが常に厳しい。 */
+static int min_client_width(void)
+{
+    static const int kBtns[] = {
+        IDC_BTN_RENAME, IDC_BTN_CLEANUP, IDC_BTN_REMOVE,
+        IDC_BTN_DETAILS, IDC_BTN_RESCAN
+    };
+    int i, total = 8 + 8;
+    if (!g_hMain || !GetDlgItem(g_hMain, IDC_BTN_RENAME)) return 0;
+    for (i = 0; i < (int)(sizeof(kBtns) / sizeof(kBtns[0])); i++)
+        total += ctrl_width(kBtns[i], 30) + GAP;
+    return total;
+}
+
 static void layout(void)
 {
     RECT rc;
-    int w, h, statusH = 0, y;
+    int w, h, statusH = 0, x, y;
     HDWP dwp;
 
     GetClientRect(g_hMain, &rc);
@@ -362,30 +477,72 @@ static void layout(void)
     dwp = DeferWindowPos(dwp, GetDlgItem(g_hMain, id), NULL, x_, y_, cx, cy, \
                          SWP_NOZORDER | SWP_NOACTIVATE)
 
-    /* 上段: 更新 / 表示フィルター / 種別 / 検索 */
-    y = 6;
-    MOVE(IDC_BTN_REFRESH,   8, y,  64, 22);
-    MOVE(IDC_CHK_PRESENT,  80, y,  70, 22);
-    MOVE(IDC_CHK_ABSENT,  154, y,  70, 22);
-    MOVE(IDC_CHK_SYSTEM,  228, y, 130, 22);
-    MOVE(IDC_LBL_FILTER,  366, y,  36, 22);
-    MOVE(IDC_CMB_KIND,    402, y, 130, 200);
-    MOVE(IDC_LBL_SEARCH,  544, y,  36, 22);
-    MOVE(IDC_EDT_SEARCH,  580, y, (w - 588 > 120 ? w - 588 : 120), 22);
+    /* 上段: 更新 / 表示フィルター / 種別 / 検索。
+     * 幅はすべて実測から出し、左から詰めて置く。座標は決め打ちしない。 */
+    {
+        /* チェックボックスの四角と文字の間隔。SM_CXMENUCHECK は DPI に
+         * 追従するが、下限を置かないと小さすぎる環境がある。 */
+        int boxW = GetSystemMetrics(SM_CXMENUCHECK);
+        int cmbW, i, itemW = 0;
+        if (boxW < 16) boxW = 16;
+
+        y = (g_toolbarH - g_ctrlH) / 2;
+        x = 8;
+
+        MOVE(IDC_BTN_REFRESH, x, y, ctrl_width(IDC_BTN_REFRESH, 28), g_ctrlH);
+        x += ctrl_width(IDC_BTN_REFRESH, 28) + GAP;
+
+        MOVE(IDC_CHK_PRESENT, x, y, ctrl_width(IDC_CHK_PRESENT, boxW + 10), g_ctrlH);
+        x += ctrl_width(IDC_CHK_PRESENT, boxW + 10) + GAP;
+
+        MOVE(IDC_CHK_ABSENT, x, y, ctrl_width(IDC_CHK_ABSENT, boxW + 10), g_ctrlH);
+        x += ctrl_width(IDC_CHK_ABSENT, boxW + 10) + GAP;
+
+        MOVE(IDC_CHK_SYSTEM, x, y, ctrl_width(IDC_CHK_SYSTEM, boxW + 10), g_ctrlH);
+        x += ctrl_width(IDC_CHK_SYSTEM, boxW + 10) + GAP * 2;
+
+        MOVE(IDC_LBL_FILTER, x, y, ctrl_width(IDC_LBL_FILTER, 6), g_ctrlH);
+        x += ctrl_width(IDC_LBL_FILTER, 6) + 4;
+
+        /* コンボは一番長い項目が収まる幅にする */
+        for (i = 0; i < (int)(sizeof(kKindItems) / sizeof(kKindItems[0])); i++) {
+            int t = text_width(kKindItems[i]);
+            if (t > itemW) itemW = t;
+        }
+        cmbW = itemW + GetSystemMetrics(SM_CXVSCROLL) + 16;
+        /* 高さはドロップダウンを開いたときの一覧の高さも兼ねる */
+        MOVE(IDC_CMB_KIND, x, y, cmbW, g_ctrlH + 200);
+        x += cmbW + GAP * 2;
+
+        MOVE(IDC_LBL_SEARCH, x, y, ctrl_width(IDC_LBL_SEARCH, 6), g_ctrlH);
+        x += ctrl_width(IDC_LBL_SEARCH, 6) + 4;
+
+        MOVE(IDC_EDT_SEARCH, x, y, (w - x - 8 > 120 ? w - x - 8 : 120), g_ctrlH);
+    }
 
     /* 中段: 一覧 */
-    MOVE(IDC_LIST, 8, TOOLBAR_H + 4,
+    MOVE(IDC_LIST, 8, g_toolbarH + 4,
          (w - 16 > 100 ? w - 16 : 100),
-         (h - statusH - TOOLBAR_H - BUTTONS_H - 8 > 60
-              ? h - statusH - TOOLBAR_H - BUTTONS_H - 8 : 60));
+         (h - statusH - g_toolbarH - g_buttonsH - 8 > 60
+              ? h - statusH - g_toolbarH - g_buttonsH - 8 : 60));
 
-    /* 下段: 操作ボタン */
-    y = h - statusH - BUTTONS_H + 6;
-    MOVE(IDC_BTN_RENAME,    8, y, 100, 26);
-    MOVE(IDC_BTN_CLEANUP, 114, y, 230, 26);
-    MOVE(IDC_BTN_REMOVE,  350, y, 120, 26);
-    MOVE(IDC_BTN_DETAILS, 476, y,  80, 26);
-    MOVE(IDC_BTN_RESCAN,  562, y,  90, 26);
+    /* 下段: 操作ボタン。ここも文字幅から出す。
+     * 「旧インスタンスを整理して名前を変更...」は特に長く、
+     * 決め打ちの 230px では先頭と末尾が欠けていた。 */
+    {
+        static const int kBtns[] = {
+            IDC_BTN_RENAME, IDC_BTN_CLEANUP, IDC_BTN_REMOVE,
+            IDC_BTN_DETAILS, IDC_BTN_RESCAN
+        };
+        int i;
+        y = h - statusH - g_buttonsH + (g_buttonsH - g_ctrlH) / 2;
+        x = 8;
+        for (i = 0; i < (int)(sizeof(kBtns) / sizeof(kBtns[0])); i++) {
+            int bw = ctrl_width(kBtns[i], 30);
+            MOVE(kBtns[i], x, y, bw, g_ctrlH);
+            x += bw + GAP;
+        }
+    }
 #undef MOVE
     EndDeferWindowPos(dwp);
 }
@@ -398,6 +555,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_CREATE:
         g_hMain = hwnd;
+        measure_metrics();   /* 幅と高さの基準。create_children より先 */
         create_children();
         return 0;
 
@@ -405,9 +563,20 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         layout();
         return 0;
 
+    /* 実測した幅の合計より狭くできないようにする。
+     * これが無いと、フォントの大きい環境でウィンドウを縮めたときに
+     * 下段のボタンが右端からはみ出して見えなくなる。 */
     case WM_GETMINMAXINFO: {
         MINMAXINFO *mmi = (MINMAXINFO *)lp;
-        mmi->ptMinTrackSize.x = 800;
+        int need = min_client_width();
+        RECT r;
+        if (need > 0) {
+            r.left = 0; r.top = 0; r.right = need; r.bottom = 300;
+            AdjustWindowRect(&r, (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE), FALSE);
+            mmi->ptMinTrackSize.x = r.right - r.left;
+        } else {
+            mmi->ptMinTrackSize.x = 800;
+        }
         mmi->ptMinTrackSize.y = 420;
         return 0;
     }
@@ -424,6 +593,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_BTN_DETAILS:
         case IDM_CTX_DETAILS: cmd_details(); return 0;
         case IDM_CTX_COPYID:  cmd_copy_id(); return 0;
+        case IDM_CTX_PRIVINFO: cmd_privilege_info(); return 0;
         case IDC_BTN_RESCAN:  cmd_rescan();  return 0;
 
         case IDC_CHK_PRESENT:
@@ -535,10 +705,24 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmdLine, int nShow)
      * 配布版は app.manifest で requireAdministrator にしてあるので、
      * 通常運用ではこの警告が出ること自体が無い。出るのは UI 確認ビルドか、
      * 昇格をキャンセルされた場合だけで、そこで操作を止める必要はない。
-     * 状態はタイトルバーとステータスバーに常時出す。 */
-    if (!dnm_is_elevated())
-        SetWindowTextW(hwnd,
-            L"Windows Device Name Manager  -  管理者権限なし (変更・削除は失敗します)");
+     * 状態はタイトルバーとステータスバーに常時出す。
+     *
+     * 昇格している側も明示する。UAC が無音昇格の設定だと、ダブルクリック
+     * しただけでも昇格するため、黙っていると「昇格していないはずなのに
+     * 管理者と出る」と見える。 */
+    {
+        ElevationInfo ei;
+        WCHAR title[256];
+        dnm_get_elevation(&ei);
+        _snwprintf(title, 256,
+                   ei.elevated
+                     ? L"Windows Device Name Manager  -  管理者権限あり (整合性レベル: %s)"
+                     : L"Windows Device Name Manager  -  管理者権限なし"
+                       L" (整合性レベル: %s / 変更・削除は失敗します)",
+                   dnm_integrity_text(ei.integrityRid));
+        title[255] = 0;
+        SetWindowTextW(hwnd, title);
+    }
 
     ShowWindow(hwnd, nShow);
     UpdateWindow(hwnd);

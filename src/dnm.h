@@ -141,6 +141,27 @@ typedef struct {
     WCHAR        actualName[DNM_MAX_NAME]; /* 再列挙後に実際に取れた名前 */
 } OpResult;
 
+/* 実行中プロセスの権限。TokenIsElevated だけだと
+ * 「なぜそう表示されるのか」が利用者に分からないので、根拠ごと持つ。 */
+typedef struct {
+    BOOL  elevated;      /* TokenElevation.TokenIsElevated */
+    int   elevationType; /* TOKEN_ELEVATION_TYPE: 1=Default 2=Full 3=Limited */
+    BOOL  inAdminGroup;  /* 実効トークンが Administrators を持つか */
+    DWORD integrityRid;  /* SECURITY_MANDATORY_*_RID。取れなければ (DWORD)-1 */
+} ElevationInfo;
+
+/* 自分に埋め込まれている RT_MANIFEST の中身 */
+typedef struct {
+    WCHAR requestedLevel[32]; /* requireAdministrator / asInvoker など */
+    int   count;              /* 見つかったマニフェストの数。2 以上はビルド異常 */
+} ManifestInfo;
+
+/* UAC の設定。読めなければ -1 */
+typedef struct {
+    int enableLua;
+    int consentPromptBehaviorAdmin;
+} UacPolicy;
+
 /* ------------------------------------------------------------------ */
 /* util.c                                                              */
 /* ------------------------------------------------------------------ */
@@ -157,6 +178,13 @@ void  dnm_guid_to_string(const GUID *g, WCHAR *buf, size_t cap);
 const WCHAR *dnm_kind_name(DeviceKind k);
 const WCHAR *dnm_protect_reason_text(ProtectReason r);
 BOOL  dnm_is_elevated(void);
+void  dnm_get_elevation(ElevationInfo *ei);
+void  dnm_get_manifest_info(ManifestInfo *mi);
+void  dnm_get_uac_policy(UacPolicy *up);
+const WCHAR *dnm_integrity_text(DWORD rid);
+void  dnm_elevation_status_text(WCHAR *buf, size_t cap);
+/* 権限まわりを全部まとめた診断テキスト (失敗ダイアログと権限診断で共用) */
+void  dnm_privilege_report(WCHAR *buf, size_t cap);
 BOOL  dnm_enable_privilege(const WCHAR *name);
 /* 連番付き名称からベース名を推定する (設計書 10 章)。断定はしない */
 void  dnm_guess_base_name(const WCHAR *current, WCHAR *out, size_t cap);

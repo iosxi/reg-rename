@@ -74,7 +74,7 @@ Windows SDK があると、MinGW 向けに書いていた回避策が減る。
 | `SetupDiSetDevicePropertyW` | ヘッダーに宣言が無く自前宣言 | setupapi.h に宣言あり |
 | `DiUninstallDevice` | `libnewdev.a` に無い | `newdev.lib` にある |
 | netcon の GUID | 実体がどのライブラリにも無く自前定義 | `uuid.lib` にある |
-| マニフェスト | `.rsrc merge failure` が毎回出る | 警告なし |
+| マニフェスト | `.rsrc merge failure` が出る (対処済み) | 警告なし |
 | `NcIsValidConnectionName` | `libnetshell.a` にある | **`netshell.lib` が SDK に無い** |
 | Core Audio の GUID | ヘッダーが `DEFINE_GUID` で定義 | **宣言のみ。`uuid.lib` にも無い** |
 
@@ -87,6 +87,11 @@ Windows SDK があると、MinGW 向けに書いていた回避策が減る。
   実測で Windows 11 26200 の `newdev.dll` / `netshell.dll` に両方存在。
 - Core Audio の GUID は `guids.c` で `#ifndef __MINGW32__` のときだけ
   定義する。値は MinGW のヘッダーに書かれているものを写した。
+- マニフェストの `.rsrc merge failure` は、MinGW-w64 の spec が実行ファイルに
+  必ず `default-manifest.o` (asInvoker) を足すのが原因で、放っておくと exe に
+  マニフェストが 2 つ入る。spec を切るオプションが無いので、`Makefile` は
+  `-B` で空の `default-manifest.o` を先に見つけさせて差し替えている。
+  MSVC は `/MANIFEST:NO` で同じことをしている。
 
 結果として**ソースは両対応のまま**で、MSVC では警告ゼロになる。
 
@@ -126,9 +131,29 @@ GNU make にはこの問題が無いので、MinGW 用 `Makefile` は日本語�
 |---|---|---|
 | 一般 PnP | Friendly Name | `SetupDiSetDevicePropertyW(DEVPKEY_Device_FriendlyName)`<br>失敗時 `SetupDiSetDeviceRegistryPropertyW(SPDRP_FRIENDLYNAME)` |
 | オーディオ | エンドポイント名 | `IMMDevice::OpenPropertyStore(STGM_READWRITE)` → `PKEY_Device_FriendlyName` → `Commit` |
-| ネットワーク | 接続名 (Interface Alias) | `INetConnection::Rename` |
+| ネットワーク | 接続名 (Interface Alias) | 1. `NciSetConnectionName` (nci.dll から実行時取得)<br>2. 駄目なら `INetConnection::Rename`<br>どちらも駄目なら両方のエラーコードを表示 |
 | 削除 | デバイスインスタンス | `DiUninstallDevice` (newdev.dll から実行時取得)<br>取れなければ `SetupDiCallClassInstaller(DIF_REMOVE)` |
 | 再列挙 | — | `CM_Reenumerate_DevNode` |
+
+### ネットワーク接続名だけ経路が 2 つある理由
+
+設計書は `INetConnection::Rename` を想定していたが、**Windows 11 26200 では
+昇格しても `0x800702E4` (ERROR_ELEVATION_REQUIRED) を返して通らない**
+(`TokenIsElevated=1` / 整合性レベル 高 を確認したうえでの実測)。
+権限の問題ではなく、この API がそのビルドで機能していない。
+
+代わりに `netsh interface set interface` が内部で呼んでいる
+`nci.dll` の `NciSetConnectionName` を第一候補にした。実測で
+非管理者は `5` (ACCESS_DENIED)、管理者は `0` を返し、`Get-NetAdapter` の
+`InterfaceAlias` まで追従する。
+
+ただしこれは 26200 での測定で、**他のビルドで `INetConnection::Rename` が
+通らないと決まったわけではない**。そのため片方に賭けず、1 が駄目なら 2 も
+試し、どちらも駄目なら両方のエラーコードと権限の状態をそのまま表示する。
+
+レジストリ (`Control\Network\{class}\{guid}\Connection\Name`) の直接書き換えは
+採らなかった。実測で値は変わるが `InterfaceAlias` が追従せず、名前が
+二重管理になるため。
 
 ---
 

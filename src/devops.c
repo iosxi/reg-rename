@@ -24,6 +24,13 @@ typedef BOOL (WINAPI *PFN_DiUninstallDevice)(HWND, HDEVINFO, PSP_DEVINFO_DATA,
                                              DWORD, PBOOL);
 typedef BOOL (WINAPI *PFN_NcIsValidConnectionName)(PCWSTR);
 
+/* nci.dll : ネットワーク接続名の読み書き。
+ * netsh interface set interface が内部で呼んでいるのがこれ。
+ * ヘッダーも .lib も公開されていないので、シグネチャは自前で書く。
+ * 戻り値は Win32 エラーコード (0 = 成功)。 */
+typedef DWORD (WINAPI *PFN_NciGetConnectionName)(const GUID *, LPWSTR, DWORD, DWORD *);
+typedef DWORD (WINAPI *PFN_NciSetConnectionName)(const GUID *, LPCWSTR);
+
 static PFN_DiUninstallDevice get_di_uninstall_device(void)
 {
     static PFN_DiUninstallDevice fn = NULL;
@@ -48,6 +55,37 @@ static PFN_NcIsValidConnectionName get_nc_is_valid_connection_name(void)
         tried = TRUE;
     }
     return fn;
+}
+
+/* nci.dll は遅延で 1 回だけ開く。2 つの関数をまとめて取る。 */
+static BOOL get_nci(PFN_NciGetConnectionName *getFn, PFN_NciSetConnectionName *setFn)
+{
+    static PFN_NciGetConnectionName g = NULL;
+    static PFN_NciSetConnectionName s = NULL;
+    static BOOL tried = FALSE;
+    if (!tried) {
+        HMODULE m = LoadLibraryW(L"nci.dll");
+        if (m) {
+            g = (PFN_NciGetConnectionName)(void *)
+                    GetProcAddress(m, "NciGetConnectionName");
+            s = (PFN_NciSetConnectionName)(void *)
+                    GetProcAddress(m, "NciSetConnectionName");
+        }
+        tried = TRUE;
+    }
+    *getFn = g;
+    *setFn = s;
+    return (g != NULL && s != NULL);
+}
+
+/* HRESULT を Win32 エラーに戻す。FACILITY_WIN32 の HRESULT
+ * (0x8007xxxx) だけが対象で、それ以外は元の値をそのまま返せないので
+ * 判定用に ERROR_INVALID_FUNCTION を返す。呼び手は生の HRESULT も持つ。 */
+static DWORD hr_to_win32(HRESULT hr)
+{
+    if ((hr & 0xFFFF0000u) == (DWORD)(0x80070000u))
+        return (DWORD)(hr & 0xFFFF);
+    return ERROR_INVALID_FUNCTION;
 }
 
 static void res_init(OpResult *r)
@@ -140,6 +178,21 @@ void dnm_rename_pnp(const DeviceInfo *d, const WCHAR *newName, OpResult *res)
 
     if (!ok) {
         res_fail_win32(res, err, L"表示名の設定");
+        /* 権限不足は原因がはっきりしているので、そう書く。
+         * 「アクセスが拒否されました」だけでは何をすればよいか分からない。 */
+        if (err == ERROR_ACCESS_DENIED || err == ERROR_ELEVATION_REQUIRED) {
+            ElevationInfo ei;
+            WCHAR add[300];
+            dnm_get_elevation(&ei);
+            _snwprintf(add, 300,
+                       L"\n\nPnP デバイス名の変更には管理者権限が必要です。\n"
+                       L"現在の状態: %s (整合性レベル: %s)",
+                       ei.elevated ? L"昇格済み" : L"昇格していません",
+                       dnm_integrity_text(ei.integrityRid));
+            add[299] = 0;
+            wcsncat(res->message, add, 511 - wcslen(res->message));
+            res->message[511] = 0;
+        }
         return;
     }
 
@@ -267,16 +320,42 @@ void dnm_rename_audio_endpoint(const WCHAR *endpointId, const WCHAR *newName,
 /* ------------------------------------------------------------------ */
 /* ネットワーク接続名のリネーム (設計書 8.1)                            */
 /*                                                                     */
-/* PowerShell を叩かず INetConnection::Rename を使う。                  */
+/* 経路を 2 つ持ち、順に試す。Windows のビルドによってどちらが通るかが   */
+/* 変わるためで、片方だけに賭けない。                                   */
+/*                                                                     */
+/*   1. nci.dll の NciSetConnectionName                                 */
+/*      netsh interface set interface が内部で呼んでいるもの。          */
+/*      Vista 以降ずっとあり、接続名の実体をここが書く。                */
+/*   2. INetConnection::Rename                                          */
+/*      設計書が想定していた経路。                                      */
+/*                                                                     */
+/* 実測 (Windows 11 26200 / 2026-09-13):                                */
+/*   INetConnection::Rename は非管理者でも管理者として実行しても        */
+/*   0x800702E4 (ERROR_ELEVATION_REQUIRED) を返し、昇格しても通らない。 */
+/*   (TokenIsElevated=1 / 整合性レベル 高 を確認したうえでの結果)       */
+/*   NciSetConnectionName は非管理者で 5 (ACCESS_DENIED)、管理者で 0。   */
+/*   後者では Get-NetAdapter の InterfaceAlias まで追従した。           */
+/*                                                                     */
+/*   ただしこれは 26200 での測定値で、23H2 など他のビルドで             */
+/*   INetConnection::Rename が通らないと決まったわけではない。          */
+/*   だから 1 が駄目なら 2 も試し、どちらの結果も利用者に見せる。       */
+/*                                                                     */
+/* レジストリ (Control\Network\{class}\{guid}\Connection\Name) の直接    */
+/* 書き換えは選ばない。実測で値は変わるが InterfaceAlias が追従せず、   */
+/* 名前が二重管理になる。                                               */
 /* ------------------------------------------------------------------ */
+static DWORD rename_net_via_netconnection(const DeviceInfo *d, const WCHAR *newName,
+                                          HRESULT *hrOut);
+
 void dnm_rename_net_alias(const DeviceInfo *d, const WCHAR *newName, OpResult *res)
 {
-    INetConnectionManager *mgr = NULL;
-    IEnumNetConnection *e = NULL;
-    INetConnection *c = NULL;
-    ULONG got = 0;
-    HRESULT hr;
-    BOOL found = FALSE;
+    PFN_NciGetConnectionName nciGet = NULL;
+    PFN_NciSetConnectionName nciSet = NULL;
+    DWORD nciRc = (DWORD)-1;      /* -1 = 試していない */
+    DWORD ncRc  = (DWORD)-1;
+    HRESULT ncHr = S_OK;
+    BOOL done = FALSE;
+    const WCHAR *usedApi = L"";
 
     res_init(res);
 
@@ -287,7 +366,7 @@ void dnm_rename_net_alias(const DeviceInfo *d, const WCHAR *newName, OpResult *r
         return;
     }
 
-    {   /* 取れないときは検証を飛ばす。Rename 自体がエラーを返すので実害はない */
+    {   /* 取れないときは検証を飛ばす。設定側がエラーを返すので実害はない */
         PFN_NcIsValidConnectionName isValid = get_nc_is_valid_connection_name();
         if (isValid && !isValid(newName)) {
             res->code = OPR_FAILED;
@@ -297,15 +376,123 @@ void dnm_rename_net_alias(const DeviceInfo *d, const WCHAR *newName, OpResult *r
         }
     }
 
+    /* --- 経路 1: NciSetConnectionName -------------------------------- */
+    if (get_nci(&nciGet, &nciSet)) {
+        nciRc = nciSet(&d->netConnGuid, newName);
+        if (nciRc == ERROR_SUCCESS) { done = TRUE; usedApi = L"NciSetConnectionName"; }
+    }
+
+    /* --- 経路 2: INetConnection::Rename ------------------------------- */
+    /* 名前の衝突は経路を変えても直らないので、そこで打ち切る。 */
+    if (!done && nciRc != ERROR_ALREADY_EXISTS && nciRc != ERROR_DUP_NAME) {
+        ncRc = rename_net_via_netconnection(d, newName, &ncHr);
+        if (ncRc == ERROR_SUCCESS) { done = TRUE; usedApi = L"INetConnection::Rename"; }
+    }
+
+    if (!done) {
+        WCHAR tried[300];
+        WCHAR nciMsg[64], ncMsg[64];
+
+        if (nciRc == (DWORD)-1) dnm_strcpy(nciMsg, 64, L"nci.dll を読み込めず未実行");
+        else                    _snwprintf(nciMsg, 64, L"%lu", (unsigned long)nciRc);
+        if (ncRc == (DWORD)-1)  dnm_strcpy(ncMsg, 64, L"未実行");
+        else                    _snwprintf(ncMsg, 64, L"HRESULT 0x%08lX",
+                                           (unsigned long)ncHr);
+
+        _snwprintf(tried, 300,
+                   L"\n\n試した経路:\n"
+                   L"  NciSetConnectionName  : %s\n"
+                   L"  INetConnection::Rename: %s",
+                   nciMsg, ncMsg);
+        tried[299] = 0;
+
+        /* 名前競合 (設計書 8.2) は分かりやすく伝える */
+        if (nciRc == ERROR_ALREADY_EXISTS || nciRc == ERROR_DUP_NAME ||
+            ncHr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) ||
+            ncHr == HRESULT_FROM_WIN32(ERROR_DUP_NAME)) {
+            res->code = OPR_FAILED;
+            res->win32Error = nciRc;
+            _snwprintf(res->message, 512,
+                       L"「%s」はすでに他のネットワーク接続が使っています。\n"
+                       L"旧アダプターを先に削除してから再実行してください。", newName);
+            res->message[511] = 0;
+            return;
+        }
+
+        /* 権限不足のときは、判断材料をそのまま出す。
+         * 「管理者として実行したのに権限エラー」の切り分けはこれが要る。 */
+        if (nciRc == ERROR_ACCESS_DENIED || nciRc == ERROR_ELEVATION_REQUIRED ||
+            ncRc  == ERROR_ACCESS_DENIED || ncRc  == ERROR_ELEVATION_REQUIRED) {
+            WCHAR report[600];
+            dnm_privilege_report(report, 600);
+            res->code = OPR_FAILED;
+            res->win32Error = (nciRc != (DWORD)-1) ? nciRc : ncRc;
+            _snwprintf(res->message, 512,
+                       L"ネットワーク接続名の変更が権限不足で拒否されました。%s\n\n%s",
+                       tried, report);
+            res->message[511] = 0;
+            return;
+        }
+
+        res_fail_win32(res, (nciRc != (DWORD)-1) ? nciRc : ncRc,
+                       L"ネットワーク接続名の変更");
+        wcsncat(res->message, tried, 511 - wcslen(res->message));
+        res->message[511] = 0;
+        return;
+    }
+
+    /* --- 検証: 読み直して名前を確認 (設計書 21 章) -------------------- */
+    {
+        WCHAR back[DNM_MAX_NAME];
+        DWORD need = 0;
+        back[0] = 0;
+        if (nciGet &&
+            nciGet(&d->netConnGuid, back, (DWORD)sizeof(back), &need) == ERROR_SUCCESS) {
+            dnm_strcpy(res->actualName, DNM_MAX_NAME, back);
+            if (wcscmp(back, newName) == 0) {
+                res->code = OPR_OK;
+                _snwprintf(res->message, 512,
+                           L"ネットワーク接続名を「%s」に変更しました。\n"
+                           L"使用 API: %s", newName, usedApi);
+            } else {
+                res->code = OPR_APPLIED_NOT_KEPT;
+                _snwprintf(res->message, 512,
+                           L"API は成功しましたが、読み直すと「%s」のままです。", back);
+            }
+        } else {
+            /* 読み直せないときは成功を断定しない (設計書 21 章) */
+            res->code = OPR_APPLIED_NOT_KEPT;
+            _snwprintf(res->message, 512,
+                       L"%s は成功を返しましたが、変更後の確認ができませんでした。",
+                       usedApi);
+        }
+        res->message[511] = 0;
+    }
+}
+
+/* 経路 2。成功なら ERROR_SUCCESS、失敗なら Win32 エラーを返す。
+ * 生の HRESULT は hrOut に入れて、呼び手がそのまま表示できるようにする。 */
+static DWORD rename_net_via_netconnection(const DeviceInfo *d, const WCHAR *newName,
+                                          HRESULT *hrOut)
+{
+    INetConnectionManager *mgr = NULL;
+    IEnumNetConnection *e = NULL;
+    INetConnection *c = NULL;
+    ULONG got = 0;
+    HRESULT hr = E_FAIL;
+    BOOL found = FALSE;
+
+    *hrOut = E_FAIL;
+
     hr = CoCreateInstance(&CLSID_ConnectionManager, NULL, CLSCTX_ALL,
                           &IID_INetConnectionManager, (void **)&mgr);
-    if (FAILED(hr)) { res_fail_hr(res, hr, L"ネットワーク接続マネージャーの生成"); return; }
+    if (FAILED(hr)) { *hrOut = hr; return hr_to_win32(hr); }
 
     hr = INetConnectionManager_EnumConnections(mgr, NCME_DEFAULT, &e);
     if (FAILED(hr)) {
         INetConnectionManager_Release(mgr);
-        res_fail_hr(res, hr, L"ネットワーク接続の列挙");
-        return;
+        *hrOut = hr;
+        return hr_to_win32(hr);
     }
 
     while (!found && IEnumNetConnection_Next(e, 1, &c, &got) == S_OK && got == 1) {
@@ -323,61 +510,14 @@ void dnm_rename_net_alias(const DeviceInfo *d, const WCHAR *newName, OpResult *r
         c = NULL;
     }
     IEnumNetConnection_Release(e);
+    INetConnectionManager_Release(mgr);
 
     if (!found) {
-        INetConnectionManager_Release(mgr);
-        res->code = OPR_FAILED;
-        dnm_strcpy(res->message, 512, L"対応するネットワーク接続を列挙できませんでした。");
-        return;
+        *hrOut = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+        return ERROR_NOT_FOUND;
     }
-    if (FAILED(hr)) {
-        INetConnectionManager_Release(mgr);
-        /* 名前競合 (設計書 8.2) は分かりやすく伝える */
-        if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) ||
-            hr == HRESULT_FROM_WIN32(ERROR_DUP_NAME)) {
-            res->code = OPR_FAILED;
-            res->hr = hr;
-            _snwprintf(res->message, 512,
-                       L"「%s」はすでに他のネットワーク接続が使っています。\n"
-                       L"旧アダプターを先に削除してから再実行してください。", newName);
-            res->message[511] = 0;
-        } else {
-            res_fail_hr(res, hr, L"ネットワーク接続名の変更");
-        }
-        return;
-    }
-
-    /* --- 検証: 列挙し直して名前を確認 -------------------------------- */
-    res->code = OPR_APPLIED_NOT_KEPT;
-    dnm_strcpy(res->message, 512, L"変更後の確認ができませんでした。");
-    if (SUCCEEDED(INetConnectionManager_EnumConnections(mgr, NCME_DEFAULT, &e))) {
-        while (IEnumNetConnection_Next(e, 1, &c, &got) == S_OK && got == 1) {
-            NETCON_PROPERTIES *p = NULL;
-            if (SUCCEEDED(INetConnection_GetProperties(c, &p)) && p) {
-                if (IsEqualGUID(&p->guidId, &d->netConnGuid)) {
-                    dnm_strcpy(res->actualName, DNM_MAX_NAME,
-                               p->pszwName ? p->pszwName : L"");
-                    if (p->pszwName && wcscmp(p->pszwName, newName) == 0) {
-                        res->code = OPR_OK;
-                        _snwprintf(res->message, 512,
-                                   L"ネットワーク接続名を「%s」に変更しました。", newName);
-                    } else {
-                        _snwprintf(res->message, 512,
-                                   L"API は成功しましたが、再取得すると「%s」のままです。",
-                                   p->pszwName ? p->pszwName : L"(不明)");
-                    }
-                    res->message[511] = 0;
-                }
-                if (p->pszwName)       CoTaskMemFree(p->pszwName);
-                if (p->pszwDeviceName) CoTaskMemFree(p->pszwDeviceName);
-                CoTaskMemFree(p);
-            }
-            INetConnection_Release(c);
-            c = NULL;
-        }
-        IEnumNetConnection_Release(e);
-    }
-    INetConnectionManager_Release(mgr);
+    *hrOut = hr;
+    return SUCCEEDED(hr) ? ERROR_SUCCESS : hr_to_win32(hr);
 }
 
 /* ------------------------------------------------------------------ */

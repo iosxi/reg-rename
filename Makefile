@@ -52,6 +52,19 @@ endif
 UITARGET := $(BINDIR)/DeviceNameManager-uitest.exe
 UIRES    := $(OBJDIR)/app-uitest.res.o
 
+# MinGW-w64 の spec は実行ファイルに必ず default-manifest.o を足す
+#   *startfile: ... %{!shared:%:if-exists(default-manifest.o%s)}
+# これは asInvoker のマニフェストを持っていて、app.rc の
+# requireAdministrator と衝突する。実測: リンク時に
+#   ld: .rsrc merge failure: multiple non-default manifests
+# が出て、出来上がった exe にマニフェストが 2 つ入る。
+# spec を切るオプションは無いので、-B で先に見つかる位置に空の
+# default-manifest.o を置いて差し替える (%s は startfile prefix を順に探し、
+# 最初に見つかったものを使う)。実測でマニフェストは 1 つだけになる。
+NOMANIFESTDIR := $(OBJDIR)/nomanifest
+NOMANIFEST    := $(NOMANIFESTDIR)/default-manifest.o
+LDFLAGS       += -B$(NOMANIFESTDIR)/
+
 .PHONY: all debug clean run uitest
 
 all: $(TARGET)
@@ -62,13 +75,20 @@ debug: $(TARGET)
 # 中身は同一で、マニフェストだけ asInvoker。変更操作は権限不足で失敗する。
 uitest: $(UITARGET)
 
-$(UITARGET): $(OBJS) $(UIRES) | $(BINDIR)
+$(UITARGET): $(OBJS) $(UIRES) $(NOMANIFEST) | $(BINDIR)
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(UIRES) $(LDLIBS)
+
+# 中身が空のオブジェクト。MinGW の default-manifest.o を押しのけるためだけに
+# 存在する。リソースを持たないので .rsrc の衝突が起きない。
+$(NOMANIFEST): | $(OBJDIR)
+	@mkdir -p $(NOMANIFESTDIR)
+	@echo 'static int dnm_no_default_manifest;' > $(NOMANIFESTDIR)/empty.c
+	$(CC) -c -o $@ $(NOMANIFESTDIR)/empty.c
 
 $(UIRES): $(SRCDIR)/app.rc $(SRCDIR)/app-uitest.manifest $(SRCDIR)/resource.h | $(OBJDIR)
 	$(WINDRES) -I$(SRCDIR) -DDNM_MANIFEST=\"app-uitest.manifest\" -O coff -o $@ $<
 
-$(TARGET): $(OBJS) $(RES) | $(BINDIR)
+$(TARGET): $(OBJS) $(RES) $(NOMANIFEST) | $(BINDIR)
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(RES) $(LDLIBS)
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.c $(SRCDIR)/dnm.h $(SRCDIR)/resource.h | $(OBJDIR)
@@ -79,13 +99,17 @@ $(RES): $(SRCDIR)/app.rc $(SRCDIR)/app.manifest $(SRCDIR)/resource.h | $(OBJDIR)
 	$(WINDRES) -I$(SRCDIR) -O coff -o $@ $<
 
 $(BINDIR):
-	@mkdir -p $(BINDIR) 2>nul || md "$(subst /,\,$(BINDIR))" 2>nul || exit 0
+	@mkdir -p $(BINDIR)
 
 $(OBJDIR):
-	@mkdir -p $(OBJDIR) 2>nul || md "$(subst /,\,$(OBJDIR))" 2>nul || exit 0
+	@mkdir -p $(OBJDIR)
 
+# mingw32-make はレシピを cmd ではなく sh で走らせるので、ここは sh の
+# 書き方でよい。以前 "2>nul" と書いていたら、リダイレクトではなく nul と
+# いう名前の空ファイルがプロジェクト直下にできてしまった。
+# mkdir -p も rm -rf も対象が有る/無いで失敗しないため、そもそも要らない。
 clean:
-	@-rm -rf build 2>nul || rd /s /q build 2>nul || exit 0
+	@rm -rf build
 
 run: $(TARGET)
 	$(TARGET)

@@ -27,6 +27,7 @@
 #define IDM_CTX_REMOVE          1102
 #define IDM_CTX_DETAILS         1103
 #define IDM_CTX_COPYID          1104
+#define IDM_CTX_PRIVINFO        1105
 
 /* 名前を変更ダイアログ (設計書 3.2 / 7.2) */
 #define IDD_RENAME              200

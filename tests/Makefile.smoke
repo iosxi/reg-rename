@@ -39,8 +39,12 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.c $(SRCDIR)/dnm.h | $(OBJDIR)
 $(OBJDIR)/smoke.o: tests/smoke.c $(SRCDIR)/dnm.h | $(OBJDIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# mingw32-make はレシピを cmd ではなく sh で走らせる。"2>nul" と書くと
+# リダイレクトにはならず、nul という名前の空ファイルがプロジェクト直下に
+# できる (実際にできた)。mkdir -p も rm -rf も対象の有無で失敗しないので、
+# エラーを握り潰す小細工はそもそも要らない。
 $(OBJDIR):
-	@mkdir -p $(OBJDIR) 2>nul || md "$(subst /,\,$(OBJDIR))" 2>nul || exit 0
+	@mkdir -p $(OBJDIR)
 
 clean:
-	@-rm -rf $(OBJDIR) $(TARGET) 2>nul || exit 0
+	@rm -rf $(OBJDIR) $(TARGET)

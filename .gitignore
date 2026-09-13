@@ -1,0 +1,7 @@
+# MinGW の default-manifest.o を押しのけるためだけに Makefile が作る中間物。
+# 中身は空で、ビルドのたびに作り直されるので追跡しない。
+build/obj/nomanifest/
+
+# mingw32-make のレシピを cmd と取り違えて "2>nul" と書くと、リダイレクトに
+# ならず nul という空ファイルができる。作らないよう直してあるが、保険。
+nul
