@@ -43,6 +43,30 @@ static const WCHAR *present_text(BOOL present)
     return present ? L"接続中" : L"未接続";
 }
 
+/* オーディオ欄のラベル。
+ *
+ * 「サウンド」画面に出る名前は Windows が
+ *   <DeviceDesc> (<インターフェイス名>)
+ * と組み立てた読み取り専用の値で、書けるのは前半だけ (実測)。
+ * 何を編集しているのかが分かるよう、組み立て結果も一緒に見せる。 */
+static const WCHAR *audio_label(const DeviceInfo *d, int idx, BOOL render,
+                                WCHAR *buf, size_t cap)
+{
+    const AudioEndpointInfo *ep = &d->audio[idx];
+
+    if (ep->interfaceName[0])
+        _snwprintf(buf, cap,
+                   L"オーディオ%s名 (編集できるのはこの欄。表示は「%s (%s)」になります)",
+                   render ? L"出力エンドポイント" : L"入力エンドポイント",
+                   ep->deviceDesc[0] ? ep->deviceDesc : L"?",
+                   ep->interfaceName);
+    else
+        _snwprintf(buf, cap, L"オーディオ%s名 (PKEY_Device_DeviceDesc)",
+                   render ? L"出力エンドポイント" : L"入力エンドポイント");
+    buf[cap - 1] = 0;
+    return buf;
+}
+
 /* 結果コードに応じたアイコンで結果を見せる。
  * 書き出したバックアップのパスも必ず添える (本人の指定)。 */
 static void report(HWND parent, const WCHAR *title, const OpResult *res)
@@ -538,7 +562,7 @@ static void rename_reflow(HWND dlg)
 static void rename_init(HWND dlg, RenameCtx *ctx)
 {
     DeviceInfo *d = ctx->dev;
-    WCHAR buf[600];
+    WCHAR buf[600], labA[300], labB[300];
     int i;
 
     SetWindowTextW(dlg, L"名前を変更");
@@ -570,25 +594,39 @@ static void rename_init(HWND dlg, RenameCtx *ctx)
     if (d->audioCount > 0) {
         /* 設計書 7.2 のレイアウト */
         if (ctx->renderIndex >= 0) {
-            set_text(dlg, IDC_RN_LBL_A, L"オーディオ出力エンドポイント名 (PKEY_Device_FriendlyName)");
-            set_text(dlg, IDC_RN_EDIT_A, d->audio[ctx->renderIndex].friendlyName);
+            set_text(dlg, IDC_RN_LBL_A, audio_label(d, ctx->renderIndex, TRUE, labA, 300));
+            set_text(dlg, IDC_RN_EDIT_A, d->audio[ctx->renderIndex].deviceDesc);
         } else {
             show_ctl(dlg, IDC_RN_LBL_A, FALSE);
             show_ctl(dlg, IDC_RN_EDIT_A, FALSE);
         }
         if (ctx->captureIndex >= 0) {
-            set_text(dlg, IDC_RN_LBL_B, L"オーディオ入力エンドポイント名 (PKEY_Device_FriendlyName)");
-            set_text(dlg, IDC_RN_EDIT_B, d->audio[ctx->captureIndex].friendlyName);
+            set_text(dlg, IDC_RN_LBL_B, audio_label(d, ctx->captureIndex, FALSE, labB, 300));
+            set_text(dlg, IDC_RN_EDIT_B, d->audio[ctx->captureIndex].deviceDesc);
         } else {
             show_ctl(dlg, IDC_RN_LBL_B, FALSE);
             show_ctl(dlg, IDC_RN_EDIT_B, FALSE);
         }
-        set_text(dlg, IDC_RN_HINT,
-                 L"PnP デバイス名とオーディオエンドポイント名は別物です。\n"
-                 L"「サウンド」画面に出るのはエンドポイント名のほうです。\n"
-                 L"変更したい行だけ書き換えてください。\n\n"
-                 L"エンドポイント名は Windows 側が管理しており、書き込みが\n"
-                 L"反映されない場合があります。適用後に実際の値を確認します。");
+        {   /* 括弧の中がどこから来ているかを具体的に書く。
+             * ここを読まないと「(2- FX-D03J) の 2- を消したい」のに
+             * エンドポイント名をいくら書き換えても変わらない。 */
+            const AudioEndpointInfo *ep =
+                &d->audio[ctx->renderIndex >= 0 ? ctx->renderIndex : ctx->captureIndex];
+            WCHAR hint[700];
+            _snwprintf(hint, 700,
+                L"「サウンド」画面に出る名前は、Windows が次のように組み立てた\n"
+                L"読み取り専用の値です。直接は書き換えられません。\n"
+                L"    %s (%s)\n"
+                L"     ↑ ここは上の欄で変更   ↑ ここはデバイス側の名前\n\n"
+                L"括弧の中は、この PnP デバイスの名前です。「2- 」のような連番が\n"
+                L"付いているときは、同じ製品の古いインスタンスが元の名前を\n"
+                L"押さえています。「旧インスタンスを整理して名前を変更...」で\n"
+                L"古いほうを片付けると取れます。",
+                ep->deviceDesc[0] ? ep->deviceDesc : L"(名前)",
+                ep->interfaceName[0] ? ep->interfaceName : L"(デバイス名)");
+            hint[699] = 0;
+            set_text(dlg, IDC_RN_HINT, hint);
+        }
     } else if (ctx->isNet) {
         set_text(dlg, IDC_RN_LBL_A, L"ネットワーク接続名 (Interface Alias)");
         set_text(dlg, IDC_RN_EDIT_A, d->netAlias);
@@ -671,7 +709,7 @@ static INT_PTR CALLBACK rename_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                     get_text(dlg, IDC_RN_EDIT_A, buf, DNM_MAX_NAME);
                     trim(buf);
                     if (buf[0] &&
-                        wcscmp(buf, d->audio[ctx->renderIndex].friendlyName) != 0) {
+                        wcscmp(buf, d->audio[ctx->renderIndex].deviceDesc) != 0) {
                         plan.renameAudioR = TRUE;
                         dnm_strcpy(plan.audioRName, DNM_MAX_NAME, buf);
                     }
@@ -680,7 +718,7 @@ static INT_PTR CALLBACK rename_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                     get_text(dlg, IDC_RN_EDIT_B, buf, DNM_MAX_NAME);
                     trim(buf);
                     if (buf[0] &&
-                        wcscmp(buf, d->audio[ctx->captureIndex].friendlyName) != 0) {
+                        wcscmp(buf, d->audio[ctx->captureIndex].deviceDesc) != 0) {
                         plan.renameAudioC = TRUE;
                         dnm_strcpy(plan.audioCName, DNM_MAX_NAME, buf);
                     }

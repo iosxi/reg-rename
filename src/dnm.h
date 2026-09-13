@@ -68,12 +68,23 @@ typedef enum {
     PROT_LAST_NETWORK       /* 唯一の接続中ネットワークアダプター  */
 } ProtectReason;
 
-/* オーディオエンドポイント (設計書 7 章) */
+/* オーディオエンドポイント (設計書 7 章)
+ *
+ * 「サウンド」画面に出る名前 (PKEY_Device_FriendlyName) は Windows が
+ *   <deviceDesc> (<interfaceName>)
+ * と組み立てた値で、書き込めない。実測 (Windows 11 / 2026-09-13):
+ *   PKEY_Device_FriendlyName          SetValue = 0x80070005 (管理者でも同じ)
+ *   PKEY_DeviceInterface_FriendlyName SetValue = 0x80070005
+ *   PKEY_Device_DeviceDesc            SetValue = 0 (非管理者でも通る)
+ * したがって利用者が変えられるのは deviceDesc の部分だけ。
+ * 括弧の中はデバイス側の名前なので、そちらは PnP 名の変更で動く。 */
 typedef struct {
-    WCHAR endpointId[DNM_MAX_NAME];   /* IMMDevice::GetId          */
-    WCHAR friendlyName[DNM_MAX_NAME]; /* PKEY_Device_FriendlyName  */
-    int   flow;                       /* 0 = eRender, 1 = eCapture */
-    DWORD state;                      /* DEVICE_STATE_*            */
+    WCHAR endpointId[DNM_MAX_NAME];   /* IMMDevice::GetId                     */
+    WCHAR friendlyName[DNM_MAX_NAME]; /* PKEY_Device_FriendlyName (読み取り専用) */
+    WCHAR deviceDesc[DNM_MAX_NAME];   /* PKEY_Device_DeviceDesc (ここだけ書ける) */
+    WCHAR interfaceName[DNM_MAX_NAME];/* PKEY_DeviceInterface_FriendlyName    */
+    int   flow;                       /* 0 = eRender, 1 = eCapture            */
+    DWORD state;                      /* DEVICE_STATE_*                       */
 } AudioEndpointInfo;
 
 /* ------------------------------------------------------------------ */

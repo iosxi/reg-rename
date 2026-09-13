@@ -130,7 +130,7 @@ GNU make にはこの問題が無いので、MinGW 用 `Makefile` は日本語�
 | 種別 | 変更先 | 使う API |
 |---|---|---|
 | 一般 PnP | Friendly Name | `SetupDiSetDevicePropertyW(DEVPKEY_Device_FriendlyName)`<br>失敗時 `SetupDiSetDeviceRegistryPropertyW(SPDRP_FRIENDLYNAME)` |
-| オーディオ | エンドポイント名 | `IMMDevice::OpenPropertyStore(STGM_READWRITE)` → `PKEY_Device_FriendlyName` → `Commit` |
+| オーディオ | エンドポイント名 | `IMMDevice::OpenPropertyStore(STGM_READWRITE)` → **`PKEY_Device_DeviceDesc`** → `Commit` |
 | ネットワーク | 接続名 (Interface Alias) | 1. `NciSetConnectionName` (nci.dll から実行時取得)<br>2. 駄目なら `INetConnection::Rename`<br>どちらも駄目なら両方のエラーコードを表示 |
 | 削除 | デバイスインスタンス | `DiUninstallDevice` (newdev.dll から実行時取得)<br>取れなければ `SetupDiCallClassInstaller(DIF_REMOVE)` |
 | 再列挙 | — | `CM_Reenumerate_DevNode` |
@@ -166,6 +166,31 @@ Dir=C:\path\to\backup
 未設定なら `<exe のあるフォルダ>\RegBackup` を使う。書き出しに失敗しても
 操作自体は止めない。止めると、バックアップ先を設定していないだけで何も
 できなくなるため。代わりに失敗の理由を結果画面に必ず出す。
+
+### オーディオの「エンドポイント名」は組み立て結果で、直接は書けない
+
+「サウンド」画面に出る名前 (`PKEY_Device_FriendlyName`) は、Windows が
+
+```
+<PKEY_Device_DeviceDesc> (<PKEY_DeviceInterface_FriendlyName>)
+```
+
+と組み立てた**読み取り専用**の値。実測 (Windows 11 / 2026-09-13、
+**管理者でも非管理者でも同じ結果**):
+
+| プロパティ | `SetValue` |
+|---|---|
+| `PKEY_Device_FriendlyName` | `0x80070005` |
+| `PKEY_DeviceInterface_FriendlyName` | `0x80070005` |
+| `PKEY_Device_DeviceDesc` | `0`（非管理者でも通る） |
+
+`MMDevices` のレジストリキーは Administrators に `SetValue` を許可しており、
+ACL の問題ではない。`FriendlyName` へ書こうとしたことが原因で、昇格しても
+直らない。そのため書き込み先は `PKEY_Device_DeviceDesc` にしてある。
+
+括弧の中はデバイス側の名前なので、そこを変えたいときは PnP 名の変更が要る。
+`2- ` のような連番が付いている場合は、同じ製品の古いインスタンスが元の名前を
+押さえているので、「旧インスタンスを整理して名前を変更」で片付ける。
 
 ### ネットワーク接続名だけ経路が 2 つある理由
 

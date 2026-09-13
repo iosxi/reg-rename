@@ -340,9 +340,24 @@ void dnm_rename_pnp(const DeviceInfo *d, const WCHAR *newName, OpResult *res)
 /* ------------------------------------------------------------------ */
 /* オーディオエンドポイントのリネーム (設計書 7.3)                      */
 /*                                                                     */
-/* 実測: OpenPropertyStore(STGM_READWRITE) は非管理者でも S_OK を返す。  */
-/* ただし SetValue/Commit が実際に永続するかは別問題なので、書き込み後   */
-/* に必ず読み直して確認する。                                           */
+/* 書き込む先は PKEY_Device_DeviceDesc であって、画面に出ている          */
+/* PKEY_Device_FriendlyName ではない。                                  */
+/*                                                                     */
+/* 実測 (Windows 11 / 2026-09-13。管理者でも非管理者でも同じ結果):       */
+/*   PKEY_Device_FriendlyName           SetValue = 0x80070005           */
+/*   PKEY_DeviceInterface_FriendlyName  SetValue = 0x80070005           */
+/*   PKEY_Device_DeviceDesc             SetValue = 0                    */
+/* FriendlyName は Windows が                                           */
+/*   <DeviceDesc> (<DeviceInterface_FriendlyName>)                      */
+/* と組み立てた読み取り専用の値で、そこへ書くと権限に関係なく            */
+/* アクセス拒否になる。昇格しても直らない。                             */
+/*   例: "SPDIF インターフェイス" + "2- FX-D03J"                         */
+/*       → "SPDIF インターフェイス (2- FX-D03J)"                        */
+/* 括弧の中はデバイス側の名前なので、そちらを変えたいときは PnP 名の      */
+/* 変更 (と、連番が付いているなら旧インスタンスの整理) が要る。          */
+/*                                                                     */
+/* OpenPropertyStore(STGM_READWRITE) は非管理者でも S_OK を返す。        */
+/* 書き込みが実際に永続するかは別問題なので、書いたあと必ず読み直す。    */
 /* ------------------------------------------------------------------ */
 void dnm_rename_audio_endpoint(const WCHAR *endpointId, const WCHAR *newName,
                                OpResult *res)
@@ -379,7 +394,7 @@ void dnm_rename_audio_endpoint(const WCHAR *endpointId, const WCHAR *newName,
     PropVariantInit(&pv);
     pv.vt = VT_LPWSTR;
     pv.pwszVal = (LPWSTR)newName;   /* Clear しないので所有権は移さない */
-    hr = IPropertyStore_SetValue(ps, &PKEY_Device_FriendlyName, &pv);
+    hr = IPropertyStore_SetValue(ps, &PKEY_Device_DeviceDesc, &pv);
     if (SUCCEEDED(hr))
         hr = IPropertyStore_Commit(ps);
     pv.vt = VT_EMPTY;
@@ -391,7 +406,7 @@ void dnm_rename_audio_endpoint(const WCHAR *endpointId, const WCHAR *newName,
     if (FAILED(hr)) {
         IMMDevice_Release(dev);
         IMMDeviceEnumerator_Release(en);
-        res_fail_hr(res, hr, L"エンドポイント表示名の書き込み");
+        res_fail_hr(res, hr, L"エンドポイント名の書き込み");
         return;
     }
 
@@ -399,7 +414,7 @@ void dnm_rename_audio_endpoint(const WCHAR *endpointId, const WCHAR *newName,
     if (SUCCEEDED(IMMDevice_OpenPropertyStore(dev, STGM_READ, &ps))) {
         PROPVARIANT chk;
         PropVariantInit(&chk);
-        if (SUCCEEDED(IPropertyStore_GetValue(ps, &PKEY_Device_FriendlyName, &chk)) &&
+        if (SUCCEEDED(IPropertyStore_GetValue(ps, &PKEY_Device_DeviceDesc, &chk)) &&
             chk.vt == VT_LPWSTR && chk.pwszVal) {
             dnm_strcpy(res->actualName, DNM_MAX_NAME, chk.pwszVal);
             if (wcscmp(chk.pwszVal, newName) == 0) {

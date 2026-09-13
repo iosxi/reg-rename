@@ -290,7 +290,7 @@ static void attach_audio_endpoints(DeviceList *list)
             IMMDevice *dev = NULL;
             IPropertyStore *ps = NULL;
             LPWSTR epId = NULL;
-            PROPVARIANT pvName, pvPath;
+            PROPVARIANT pvName, pvPath, pvDesc, pvIface;
             DWORD state = 0;
             WCHAR ownerId[MAX_DEVICE_ID_LEN];
             DeviceInfo *owner = NULL;
@@ -305,9 +305,15 @@ static void attach_audio_endpoints(DeviceList *list)
 
             PropVariantInit(&pvName);
             PropVariantInit(&pvPath);
+            PropVariantInit(&pvDesc);
+            PropVariantInit(&pvIface);
             if (SUCCEEDED(IMMDevice_OpenPropertyStore(dev, STGM_READ, &ps))) {
                 IPropertyStore_GetValue(ps, &PKEY_Device_FriendlyName, &pvName);
                 IPropertyStore_GetValue(ps, &PKEY_DeviceNode_Path, &pvPath);
+                /* 表示名は組み立て結果なので、その素も取っておく。
+                 * 書き換えられるのは DeviceDesc のほうだけ (実測)。 */
+                IPropertyStore_GetValue(ps, &PKEY_Device_DeviceDesc, &pvDesc);
+                IPropertyStore_GetValue(ps, &PKEY_DeviceInterface_FriendlyName, &pvIface);
             }
 
             ownerId[0] = 0;
@@ -331,6 +337,10 @@ static void attach_audio_endpoints(DeviceList *list)
                 dnm_strcpy(ep->endpointId, DNM_MAX_NAME, epId ? epId : L"");
                 dnm_strcpy(ep->friendlyName, DNM_MAX_NAME,
                            pvName.vt == VT_LPWSTR ? pvName.pwszVal : L"");
+                dnm_strcpy(ep->deviceDesc, DNM_MAX_NAME,
+                           pvDesc.vt == VT_LPWSTR ? pvDesc.pwszVal : L"");
+                dnm_strcpy(ep->interfaceName, DNM_MAX_NAME,
+                           pvIface.vt == VT_LPWSTR ? pvIface.pwszVal : L"");
                 ep->state = state;
                 ep->flow = 0;
                 /* 出力 / 入力の別は IMMEndpoint からしか取れない */
@@ -346,6 +356,8 @@ static void attach_audio_endpoints(DeviceList *list)
 
             PropVariantClear(&pvName);
             PropVariantClear(&pvPath);
+            PropVariantClear(&pvDesc);
+            PropVariantClear(&pvIface);
             if (ps) IPropertyStore_Release(ps);
             if (epId) CoTaskMemFree(epId);
             IMMDevice_Release(dev);
