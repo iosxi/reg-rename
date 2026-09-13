@@ -986,16 +986,24 @@ static void cleanup_fill_list(HWND dlg, CleanupCtx *ctx)
     ZeroMemory(&col, sizeof(col));
     col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
 
-    col.pszText = (LPWSTR)L"表示名";      col.cx = 150; col.iSubItem = 0;
+    /* 「別名」列は必須。同じ製品が 3 つあると表示名は 3 つとも同じで、
+     * Instance ID は長すぎて見比べられない。接続名やエンドポイント名なら
+     * 個体ごとに違う (「SPDIF インターフェイス (2- FX-D03J)」等) ので、
+     * 表示名のすぐ右に置いて見分けられるようにする。 */
+    col.pszText = (LPWSTR)L"表示名";      col.cx = 170; col.iSubItem = 0;
     ListView_InsertColumn(lv, 0, &col);
-    col.pszText = (LPWSTR)L"状態";        col.cx =  60; col.iSubItem = 1;
+    /* 別名はここで見分けるための列なので、切れないように広く取る */
+    col.pszText = (LPWSTR)L"別名 (接続名 / エンドポイント)";
+                                          col.cx = 320; col.iSubItem = 1;
     ListView_InsertColumn(lv, 1, &col);
-    col.pszText = (LPWSTR)L"スコア";      col.cx =  50; col.iSubItem = 2;
+    col.pszText = (LPWSTR)L"状態";        col.cx =  60; col.iSubItem = 2;
     ListView_InsertColumn(lv, 2, &col);
-    col.pszText = (LPWSTR)L"一致した根拠"; col.cx = 210; col.iSubItem = 3;
+    col.pszText = (LPWSTR)L"スコア";      col.cx =  50; col.iSubItem = 3;
     ListView_InsertColumn(lv, 3, &col);
-    col.pszText = (LPWSTR)L"Instance ID"; col.cx = 260; col.iSubItem = 4;
+    col.pszText = (LPWSTR)L"一致した根拠"; col.cx = 180; col.iSubItem = 4;
     ListView_InsertColumn(lv, 4, &col);
+    col.pszText = (LPWSTR)L"Instance ID"; col.cx = 200; col.iSubItem = 5;
+    ListView_InsertColumn(lv, 5, &col);
 
     for (i = 0; i < ctx->candCount; i++) {
         const DeviceInfo *d = &ctx->list->items[ctx->cand[i].index];
@@ -1009,11 +1017,12 @@ static void cleanup_fill_list(HWND dlg, CleanupCtx *ctx)
         it.lParam = i;
         ListView_InsertItem(lv, &it);
 
-        ListView_SetItemText(lv, i, 1, (LPWSTR)present_text(d->isPresent));
+        ListView_SetItemText(lv, i, 1, (LPWSTR)dnm_alias_text(d));
+        ListView_SetItemText(lv, i, 2, (LPWSTR)present_text(d->isPresent));
         _snwprintf(num, 16, L"%d", ctx->cand[i].score);
-        ListView_SetItemText(lv, i, 2, num);
-        ListView_SetItemText(lv, i, 3, (LPWSTR)ctx->cand[i].reasons);
-        ListView_SetItemText(lv, i, 4, (LPWSTR)d->instanceId);
+        ListView_SetItemText(lv, i, 3, num);
+        ListView_SetItemText(lv, i, 4, (LPWSTR)ctx->cand[i].reasons);
+        ListView_SetItemText(lv, i, 5, (LPWSTR)d->instanceId);
 
         /* 既定チェックは「強候補 かつ 未接続 かつ Hardware ID 一致」のみ。
          *
@@ -1042,11 +1051,13 @@ static void cleanup_update_plan(HWND dlg, CleanupCtx *ctx)
 
     _snwprintf(plan, 1024,
         L"実行内容 (この順番で実行します):\r\n"
-        L"  1. チェックした旧デバイス %d 件を削除\r\n"
+        L"  1. チェックした旧デバイス %d 件を削除 (直前に .reg を書き出します)\r\n"
         L"  2. PnP 状態の反映を待って再列挙\r\n"
-        L"  3. 対象デバイスを取り直す\r\n"
-        L"  4. 名前を「%s」に変更\r\n"
-        L"  5. もう一度取り直して、名前が保たれたか検証",
+        L"  3. 残す対象を取り直す\r\n"
+        L"  4. 残す対象の名前を「%s」に変更\r\n"
+        L"  5. もう一度取り直して、名前が保たれたか検証\r\n"
+        L"※ この画面を開く前に選ぶのは「残したいほう」です。"
+        L"ふつうは接続中のものを選びます。",
         checked, name[0] ? name : L"(未入力)");
     plan[1023] = 0;
     set_text(dlg, IDC_CU_PLAN, plan);
@@ -1184,18 +1195,25 @@ static INT_PTR CALLBACK cleanup_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         set_text(dlg, IDCANCEL, L"キャンセル");
         set_text(dlg, IDC_CU_BASE, L"連番を除去した名前");
 
+        /* 表示名だけだと、同じ製品が複数あるときにどれを指しているのか
+         * 分からない (指摘)。別名と接続状態も並べる。 */
         _snwprintf(buf, 700,
-                   L"現在の対象:  %s\r\n"
-                   L"    Instance : %s\r\n"
-                   L"    Location : %s",
-                   t->displayName, t->instanceId,
-                   t->location[0] ? t->location : L"(なし)");
+                   L"残す対象 (このデバイスは削除しません。名前だけ変更します)\r\n"
+                   L"    表示名  : %s\r\n"
+                   L"    別名    : %s\r\n"
+                   L"    状態    : %s\r\n"
+                   L"    Instance: %s",
+                   t->displayName,
+                   dnm_alias_text(t)[0] ? dnm_alias_text(t) : L"(なし)",
+                   present_text(t->isPresent),
+                   t->instanceId);
         buf[699] = 0;
         set_text(dlg, IDC_CU_TARGET, buf);
 
         set_text(dlg, IDC_CU_LBL1,
-                 L"同一ハードウェア候補 (削除するものにチェック。名前だけでは判断しません)");
-        set_text(dlg, IDC_CU_LBL2, L"対象デバイスの新しい名前:");
+                 L"削除する候補 (チェックしたものだけを削除します。"
+                 L"上の「残す対象」は消えません)");
+        set_text(dlg, IDC_CU_LBL2, L"残す対象に付ける新しい名前:");
 
         cleanup_fill_list(dlg, ctx);
 

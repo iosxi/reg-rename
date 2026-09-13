@@ -118,6 +118,19 @@ const WCHAR *dnm_kind_name(DeviceKind k)
     }
 }
 
+/* 一覧やダイアログで「どれがどれか」を見分けるための別名。
+ *
+ * 同じ製品が複数あると表示名は全部同じになり、Instance ID は長すぎて
+ * 見比べられない。ネットワークなら接続名、オーディオならエンドポイント名が
+ * 個体ごとに違う (「SPDIF インターフェイス (2- FX-D03J)」のように連番が
+ * 付く) ので、それを見分けの手がかりにする。 */
+const WCHAR *dnm_alias_text(const DeviceInfo *d)
+{
+    if (d->netAlias[0])   return d->netAlias;
+    if (d->audioCount > 0) return d->audio[0].friendlyName;
+    return L"";
+}
+
 const WCHAR *dnm_protect_reason_text(ProtectReason r)
 {
     switch (r) {

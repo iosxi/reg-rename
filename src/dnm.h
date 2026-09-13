@@ -210,6 +210,8 @@ void  dnm_format_error(DWORD err, WCHAR *buf, size_t cap);
 void  dnm_guid_to_string(const GUID *g, WCHAR *buf, size_t cap);
 const WCHAR *dnm_kind_name(DeviceKind k);
 const WCHAR *dnm_protect_reason_text(ProtectReason r);
+/* 同じ製品が複数あるときの見分け用 (接続名 / エンドポイント名) */
+const WCHAR *dnm_alias_text(const DeviceInfo *d);
 BOOL  dnm_is_elevated(void);
 void  dnm_get_elevation(ElevationInfo *ei);
 void  dnm_get_manifest_info(ManifestInfo *mi);

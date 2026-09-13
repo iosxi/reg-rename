@@ -123,20 +123,25 @@ END
 /* ------------------------------------------------------------------ */
 /* 旧インスタンス整理 + リネーム (設計書 9.3)                           */
 /* ------------------------------------------------------------------ */
-IDD_CLEANUP DIALOGEX 0, 0, 420, 332
+/*
+ * 幅を 420 -> 560 に広げてある。候補一覧に「別名」列を足したため。
+ * 同じ製品が 3 つあると表示名は 3 つとも同じで、Instance ID は長すぎて
+ * 見比べられない。別名が見えないと、どれを消すのか決められない。
+ */
+IDD_CLEANUP DIALOGEX 0, 0, 560, 352
 STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Cleanup and rename"
 FONT 9, "MS Shell Dlg", 400, 0, 0x1
 BEGIN
-    LTEXT           "", IDC_CU_TARGET,   8,  8, 404, 28, SS_NOPREFIX
-    LTEXT           "", IDC_CU_LBL1,     8, 40, 404,  9, SS_NOPREFIX
+    LTEXT           "", IDC_CU_TARGET,   8,  8, 544, 46, SS_NOPREFIX
+    LTEXT           "", IDC_CU_LBL1,     8, 58, 544,  9, SS_NOPREFIX
     CONTROL         "", IDC_CU_LIST, WC_LISTVIEW,
                         LVS_REPORT | LVS_SINGLESEL | WS_BORDER | WS_TABSTOP,
-                        8, 52, 404, 140
-    LTEXT           "", IDC_CU_LBL2,     8,200, 404,  9, SS_NOPREFIX
-    EDITTEXT            IDC_CU_NEWNAME,  8,211, 300, 14, ES_AUTOHSCROLL
-    PUSHBUTTON      "", IDC_CU_BASE,   314,211,  98, 14
-    LTEXT           "", IDC_CU_PLAN,     8,232, 404, 62, SS_NOPREFIX
-    DEFPUSHBUTTON   "", IDOK,          284,304,  60, 16
-    PUSHBUTTON      "", IDCANCEL,      348,304,  60, 16
+                        8, 70, 544, 140
+    LTEXT           "", IDC_CU_LBL2,     8,218, 544,  9, SS_NOPREFIX
+    EDITTEXT            IDC_CU_NEWNAME,  8,229, 420, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "", IDC_CU_BASE,   434,229, 118, 14
+    LTEXT           "", IDC_CU_PLAN,     8,250, 544, 64, SS_NOPREFIX
+    DEFPUSHBUTTON   "", IDOK,          424,324,  60, 16
+    PUSHBUTTON      "", IDCANCEL,      488,324,  60, 16
 END
