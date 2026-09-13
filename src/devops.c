@@ -672,8 +672,10 @@ void dnm_remove_device(const DeviceInfo *d, OpResult *res)
     BOOL needReboot = FALSE;
     const WCHAR *usedApi = L"";
     DWORD err = 0;
+    WCHAR backupPath[MAX_PATH];
 
     res_init(res);
+    backupPath[0] = 0;
 
     if (d->protect != PROT_NONE) {
         res->code = OPR_SKIPPED;
@@ -681,21 +683,6 @@ void dnm_remove_device(const DeviceInfo *d, OpResult *res)
                    dnm_protect_reason_text(d->protect));
         res->message[511] = 0;
         return;
-    }
-
-    /* 削除の直前に、消える予定のキーを丸ごと書き出しておく。
-     * 削除は取り消せないので、ここは特に外せない。
-     * 書き出せなくても削除自体は止めない (理由は画面に出す)。 */
-    {
-        WCHAR regPath[600], path[MAX_PATH], err[300];
-        dnm_regpath_pnp(d->instanceId, regPath, 600);
-        if (dnm_backup_reg_key(regPath, L"remove", d->instanceId,
-                               path, MAX_PATH, err, 300))
-            _snwprintf(res->backupInfo, 1024, L"  [remove] %s", path);
-        else
-            _snwprintf(res->backupInfo, 1024,
-                       L"  [remove] 書き出せませんでした: %s", err);
-        res->backupInfo[1023] = 0;
     }
 
     dnm_enable_privilege(SE_LOAD_DRIVER_NAME);
@@ -714,15 +701,41 @@ void dnm_remove_device(const DeviceInfo *d, OpResult *res)
         return;
     }
 
+    /* 削除の直前に、消える予定のキーを丸ごと書き出す。
+     * 削除は取り消せないので、ここは特に外せない。
+     * 書き出せなくても削除自体は止めない (理由は画面に出す)。
+     *
+     * 書き出しはここまで引っ張る。デバイスを開く前に書いてしまうと、
+     * 開けずに何もできなかった場合にも .reg だけが残る。
+     * 実際に消せなかったときも、下で backupPath のファイルごと消す。 */
+    {
+        WCHAR regPath[600], berr[300];
+        dnm_regpath_pnp(d->instanceId, regPath, 600);
+        if (dnm_backup_reg_key(regPath, L"remove", d->instanceId,
+                               backupPath, MAX_PATH, berr, 300))
+            _snwprintf(res->backupInfo, 1024, L"  [remove] %s", backupPath);
+        else
+            _snwprintf(res->backupInfo, 1024,
+                       L"  [remove] 書き出せませんでした: %s", berr);
+        res->backupInfo[1023] = 0;
+    }
+
+#define REMOVE_FAILED(errCode, what) do {                 \
+        SetupDiDestroyDeviceInfoList(h);                  \
+        res_fail_win32(res, (errCode), (what));           \
+        /* 何も消えていないので、バックアップも残さない */ \
+        if (backupPath[0]) {                              \
+            DeleteFileW(backupPath);                      \
+            res->backupInfo[0] = 0;                       \
+        }                                                 \
+        return;                                           \
+    } while (0)
+
     diUninstall = get_di_uninstall_device();
     if (diUninstall) {
         usedApi = L"DiUninstallDevice";
-        if (!diUninstall(NULL, h, &dd, 0, &needReboot)) {
-            err = GetLastError();
-            SetupDiDestroyDeviceInfoList(h);
-            res_fail_win32(res, err, L"デバイスの削除 (DiUninstallDevice)");
-            return;
-        }
+        if (!diUninstall(NULL, h, &dd, 0, &needReboot))
+            REMOVE_FAILED(GetLastError(), L"デバイスの削除 (DiUninstallDevice)");
     } else {
         usedApi = L"SetupDiCallClassInstaller(DIF_REMOVE)";
 
@@ -732,19 +745,12 @@ void dnm_remove_device(const DeviceInfo *d, OpResult *res)
         rp.Scope    = DI_REMOVEDEVICE_GLOBAL;
         rp.HwProfile = 0;
 
-        if (!SetupDiSetClassInstallParamsW(h, &dd, &rp.ClassInstallHeader, sizeof(rp))) {
-            err = GetLastError();
-            SetupDiDestroyDeviceInfoList(h);
-            res_fail_win32(res, err, L"削除パラメーターの設定");
-            return;
-        }
-        if (!SetupDiCallClassInstaller(DIF_REMOVE, h, &dd)) {
-            err = GetLastError();
-            SetupDiDestroyDeviceInfoList(h);
-            res_fail_win32(res, err, L"デバイスの削除");
-            return;
-        }
+        if (!SetupDiSetClassInstallParamsW(h, &dd, &rp.ClassInstallHeader, sizeof(rp)))
+            REMOVE_FAILED(GetLastError(), L"削除パラメーターの設定");
+        if (!SetupDiCallClassInstaller(DIF_REMOVE, h, &dd))
+            REMOVE_FAILED(GetLastError(), L"デバイスの削除");
     }
+#undef REMOVE_FAILED
     SetupDiDestroyDeviceInfoList(h);
 
     /* --- 検証: 本当に消えたか ---------------------------------------- */

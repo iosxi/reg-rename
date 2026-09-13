@@ -95,21 +95,57 @@ static void append_line(WCHAR *buf, size_t cap, const WCHAR *line)
     dnm_strcpy(buf + wcslen(buf), cap - wcslen(buf), line);
 }
 
-/* 変更の直前にバックアップを書き出し、結果を out->backupInfo に積む。
- * バックアップに失敗しても操作自体は止めない。止めると、バックアップ先を
- * 設定していないだけで何もできなくなる。代わりに画面に必ず出す。 */
-static void backup_step(OpResult *out, const WCHAR *regPath,
-                        const WCHAR *tag, const WCHAR *label)
-{
-    WCHAR path[MAX_PATH], err[300], line[MAX_PATH + 80];
+/* ------------------------------------------------------------------ */
+/* バックアップの取り回し                                              */
+/*                                                                     */
+/* バックアップは変更の「直前」でなければ意味がないが、書いたあとで      */
+/* 変更が行われなかったのなら、その .reg は残す理由がない。             */
+/* (指摘: 競合の確認画面でキャンセルしたのに .reg ができていた)          */
+/*                                                                     */
+/* そこで書き出しと記録を分ける。                                       */
+/*   backup_begin   ... 書き出す。まだ結果には載せない                  */
+/*   backup_commit  ... 変更が行われたので残し、パスを結果に載せる      */
+/*   backup_discard ... 何も変わらなかったのでファイルごと消す          */
+/* ------------------------------------------------------------------ */
+typedef struct {
+    BOOL  taken;             /* 書き出せたか */
+    WCHAR path[MAX_PATH];
+    WCHAR err[300];
+} BackupSlot;
 
-    if (dnm_backup_reg_key(regPath, tag, label, path, MAX_PATH, err, 300))
-        _snwprintf(line, MAX_PATH + 80, L"  [%s] %s", tag, path);
+/* バックアップに失敗しても操作自体は止めない。止めると、バックアップ先を
+ * 設定していないだけで何もできなくなる。代わりに画面に必ず出す。 */
+static void backup_begin(BackupSlot *b, const WCHAR *regPath,
+                         const WCHAR *tag, const WCHAR *label)
+{
+    ZeroMemory(b, sizeof(*b));
+    b->taken = dnm_backup_reg_key(regPath, tag, label,
+                                  b->path, MAX_PATH, b->err, 300);
+}
+
+static void backup_commit(OpResult *out, const BackupSlot *b, const WCHAR *tag)
+{
+    WCHAR line[MAX_PATH + 80];
+
+    if (b->taken)
+        _snwprintf(line, MAX_PATH + 80, L"  [%s] %s", tag, b->path);
     else
-        _snwprintf(line, MAX_PATH + 80, L"  [%s] 書き出せませんでした: %s", tag, err);
+        _snwprintf(line, MAX_PATH + 80, L"  [%s] 書き出せませんでした: %s", tag, b->err);
     line[MAX_PATH + 79] = 0;
 
     append_line(out->backupInfo, 1024, line);
+}
+
+static void backup_discard(BackupSlot *b)
+{
+    if (b->taken) DeleteFileW(b->path);
+    b->taken = FALSE;
+}
+
+/* 変更が起きたと言えるか。失敗と見送りは「何も変わっていない」。 */
+static BOOL changed_anything(OpResultCode c)
+{
+    return c == OPR_OK || c == OPR_APPLIED_NOT_KEPT;
 }
 
 /* ------------------------------------------------------------------ */
@@ -165,6 +201,8 @@ static BOOL conflict_confirm(HWND parent, const WCHAR *newName,
         L"  1. 変更対象の接続キー (Connection)\r\n"
         L"  2. 削除するアダプターのキー (Enum)\r\n"
         L"書き出したファイルのパスは、完了後の画面に表示します。\r\n"
+        L"「キャンセル」を押した場合は、レジストリも変更しませんし、\r\n"
+        L".reg ファイルも作りません。\r\n"
         L"\r\n"
         L"なお、一覧に「%s」という名前の PnP デバイス (SWD\\RADIO\\...) が\r\n"
         L"出ている場合、それは上のアダプターの無線ノードであって、\r\n"
@@ -182,62 +220,46 @@ static BOOL conflict_confirm(HWND parent, const WCHAR *newName,
                            conflict_proc, (LPARAM)text) == IDOK;
 }
 
-/* 競合した旧アダプターを削除し、名前の変更をやり直す。
- * 進行状況は msg へ積み、書き出したバックアップは backup へ足す。 */
-static void resolve_conflict_and_retry(HWND parent, const DeviceInfo *d,
-                                       const WCHAR *newName, OpResult *out,
-                                       OpResult *r)
+/* 競合していた旧アダプターを削除する。
+ * 名前が空いて、変更をやり直してよければ TRUE。 */
+static BOOL remove_conflicting_adapter(const DeviceInfo *d, const WCHAR *newName,
+                                       const ConnNameOwner *own, OpResult *out)
 {
-    ConnNameOwner own = r->conflictOwner;
     DeviceInfo old;
-    BOOL oldFound;
+    OpResult rm;
 
-    if (!own.found || own.instanceId[0] == 0) {
-        append_line(out->message, 1024,
-                    L"(競合相手を特定できないため、確認画面は出していません)");
-        return;
-    }
-
-    oldFound = dnm_refetch(own.instanceId, &old);
-
-    if (!conflict_confirm(parent, newName, &own, &old, oldFound)) {
-        if (oldFound) free(old.hardwareIds);
-        append_line(out->message, 1024, L"→ キャンセルしました。何も変更していません。");
-        return;
-    }
-
-    if (!oldFound) {
+    if (!dnm_refetch(own->instanceId, &old)) {
+        out->code = worse(out->code, OPR_FAILED);
         append_line(out->message, 1024,
                     L"→ 競合相手をデバイスとして取得できず、削除できませんでした。");
-        return;
+        return FALSE;
     }
 
-    /* --- 1. 旧アダプターを削除 (この中でバックアップも書き出される) ---- */
-    {
-        OpResult rm;
-        dnm_remove_device(&old, &rm);
-        dnm_history_log_remove(&old, &rm);
-        free(old.hardwareIds);
+    /* 削除の直前のバックアップは dnm_remove_device が自分で書き出す。
+     * 削除できなかった場合は、あちらで .reg も消える。 */
+    dnm_remove_device(&old, &rm);
+    dnm_history_log_remove(&old, &rm);
+    free(old.hardwareIds);
 
-        if (rm.backupInfo[0]) append_line(out->backupInfo, 1024, rm.backupInfo);
+    if (rm.backupInfo[0]) append_line(out->backupInfo, 1024, rm.backupInfo);
 
-        append_line(out->message, 1024, L"");
-        append_line(out->message, 1024, L"[競合していたアダプターの削除]");
-        append_line(out->message, 1024, rm.message);
+    append_line(out->message, 1024, L"");
+    append_line(out->message, 1024, L"[競合していたアダプターの削除]");
+    append_line(out->message, 1024, rm.message);
 
-        if (rm.code != OPR_OK) {
-            out->code = worse(out->code, rm.code);
-            append_line(out->message, 1024,
-                        L"→ 削除できなかったので、名前の変更はやり直していません。");
-            return;
-        }
+    if (rm.code != OPR_OK) {
+        out->code = worse(out->code, rm.code);
+        append_line(out->message, 1024,
+                    L"→ 削除できなかったので、名前の変更はやり直していません。");
+        return FALSE;
     }
 
-    /* --- 2. PnP の状態が落ち着くのを待って再列挙 --------------------- */
+    /* PnP の状態が落ち着くのを待って再列挙 */
     dnm_rescan_devices();
     Sleep(800);
 
-    /* --- 3. 名前がまだ使われていないか、先に確かめる ------------------ */
+    /* 名前が本当に空いたかを確かめる。アダプターを消しても Windows が
+     * 接続の登録を残すことがあり、そのまま進めても失敗するだけ。 */
     {
         ConnNameOwner again;
         dnm_find_conn_name_owner(newName, &d->netConnGuid, &again);
@@ -248,23 +270,91 @@ static void resolve_conflict_and_retry(HWND parent, const DeviceInfo *d,
                 L"[再確認] アダプターを削除しても、接続名はまだ使われたままです。");
             append_line(out->message, 1024,
                 L"Windows が接続の登録を残しているため、再起動後に再実行してください。");
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+/* ネットワーク接続名の変更。
+ *
+ * 競合の確認は「バックアップを書く前」に行う。順番を逆にすると、
+ * 確認画面でキャンセルしただけで .reg が残ってしまう (指摘を受けた点)。
+ * レジストリを変えないなら .reg も作らない。 */
+static void rename_net_with_conflict_check(HWND parent, const DeviceInfo *d,
+                                           const WCHAR *newName, OpResult *out)
+{
+    ConnNameOwner own;
+    BOOL removeOld = FALSE;
+    BackupSlot bs;
+    WCHAR regPath[600];
+    OpResult r;
+
+    append_line(out->message, 1024, L"");
+    append_line(out->message, 1024, L"[ネットワーク接続名]");
+
+    /* --- 1. まだ何も書かずに、名前が空いているかだけ調べる ------------ */
+    dnm_find_conn_name_owner(newName, &d->netConnGuid, &own);
+
+    if (own.found) {
+        DeviceInfo old;
+        BOOL oldFound = dnm_refetch(own.instanceId, &old);
+
+        if (own.instanceId[0] == 0) {
+            out->code = worse(out->code, OPR_FAILED);
+            append_line(out->message, 1024,
+                L"この接続名はすでに使われていますが、相手のアダプターを"
+                L"特定できませんでした。");
+            if (oldFound) free(old.hardwareIds);
+            return;
+        }
+
+        removeOld = conflict_confirm(parent, newName, &own, &old, oldFound);
+        if (oldFound) free(old.hardwareIds);
+
+        if (!removeOld) {
+            /* ここで抜ける。バックアップはまだ 1 つも書いていない。 */
+            out->code = worse(out->code, OPR_SKIPPED);
+            append_line(out->message, 1024,
+                L"キャンセルしました。何も変更していません "
+                L"(レジストリの書き出しも行っていません)。");
             return;
         }
     }
 
-    /* --- 4. 名前の変更をやり直す ------------------------------------- */
-    {
-        OpResult r2;
-        dnm_rename_net_alias(d, newName, &r2);
-        dnm_history_log_rename(d, L"net_alias", d->netAlias, newName, &r2);
-        out->code = worse(out->code, r2.code);
-        append_line(out->message, 1024, L"");
-        append_line(out->message, 1024, L"[ネットワーク接続名 (やり直し)]");
-        append_line(out->message, 1024, r2.message);
+    /* --- 2. ここから実際に変える。変更対象の接続キーを書き出す -------- */
+    dnm_regpath_netconn(&d->netConnGuid, regPath, 600);
+    backup_begin(&bs, regPath, L"net", d->instanceId);
 
-        /* やり直しが通ったなら、最初の失敗で付いた FAILED を引きずらない */
-        if (r2.code == OPR_OK) out->code = OPR_OK;
+    /* --- 3. 競合していたなら、先に旧アダプターを削除 ------------------ */
+    if (removeOld && !remove_conflicting_adapter(d, newName, &own, out)) {
+        /* 接続キーは結局変えていないので、その .reg は残さない */
+        backup_discard(&bs);
+        return;
     }
+
+    /* --- 4. 名前を変える ---------------------------------------------- */
+    dnm_rename_net_alias(d, newName, &r);
+    dnm_history_log_rename(d, L"net_alias", d->netAlias, newName, &r);
+    out->code = worse(out->code, r.code);
+    append_line(out->message, 1024, r.message);
+
+    if (changed_anything(r.code)) backup_commit(out, &bs, L"net");
+    else                          backup_discard(&bs);
+}
+
+/* 変更を 1 件行い、変わったときだけバックアップを残す共通処理 */
+static void rename_step(OpResult *out, const WCHAR *regPath, const WCHAR *tag,
+                        const WCHAR *label, const WCHAR *heading,
+                        const OpResult *r, BackupSlot *bs)
+{
+    out->code = worse(out->code, r->code);
+    append_line(out->message, 1024, heading);
+    append_line(out->message, 1024, r->message);
+
+    if (changed_anything(r->code)) backup_commit(out, bs, tag);
+    else                           backup_discard(bs);
+    (void)regPath; (void)label;
 }
 
 static void apply_rename_plan(HWND parent, const DeviceInfo *d,
@@ -272,71 +362,48 @@ static void apply_rename_plan(HWND parent, const DeviceInfo *d,
 {
     OpResult r;
     WCHAR regPath[600];
+    BackupSlot bs;
 
     ZeroMemory(out, sizeof(*out));
     out->code = OPR_OK;
     out->message[0] = 0;
 
-    /* --- 変更する項目それぞれについて、変更前のキーを書き出す ---------- */
+    /* 項目ごとに「直前に書き出す → 実行する → 変わっていなければ消す」。
+     * まとめて先に書き出すと、失敗した項目のぶんまで .reg が残る。 */
     if (plan->renamePnp) {
         dnm_regpath_pnp(d->instanceId, regPath, 600);
-        backup_step(out, regPath, L"pnp", d->instanceId);
-    }
-    if (plan->renameNet) {
-        dnm_regpath_netconn(&d->netConnGuid, regPath, 600);
-        backup_step(out, regPath, L"net", d->instanceId);
-    }
-    if (plan->renameAudioR && plan->audioRIndex >= 0) {
-        dnm_regpath_audio(d->audio[plan->audioRIndex].endpointId, 0, regPath, 600);
-        backup_step(out, regPath, L"audio_render",
-                    d->audio[plan->audioRIndex].endpointId);
-    }
-    if (plan->renameAudioC && plan->audioCIndex >= 0) {
-        dnm_regpath_audio(d->audio[plan->audioCIndex].endpointId, 1, regPath, 600);
-        backup_step(out, regPath, L"audio_capture",
-                    d->audio[plan->audioCIndex].endpointId);
-    }
-
-    if (plan->renamePnp) {
+        backup_begin(&bs, regPath, L"pnp", d->instanceId);
         dnm_rename_pnp(d, plan->pnpName, &r);
         dnm_history_log_rename(d, L"pnp", d->friendlyName, plan->pnpName, &r);
-        out->code = worse(out->code, r.code);
-        append_line(out->message, 1024, L"[PnP デバイス名]");
-        append_line(out->message, 1024, r.message);
+        rename_step(out, regPath, L"pnp", d->instanceId,
+                    L"[PnP デバイス名]", &r, &bs);
     }
     if (plan->renameNet) {
-        dnm_rename_net_alias(d, plan->netName, &r);
-        dnm_history_log_rename(d, L"net_alias", d->netAlias, plan->netName, &r);
-        out->code = worse(out->code, r.code);
-        append_line(out->message, 1024, L"");
-        append_line(out->message, 1024, L"[ネットワーク接続名]");
-        append_line(out->message, 1024, r.message);
-
-        /* 名前が埋まっていただけなら、確認画面を出して選ばせる */
-        if (r.nameConflict)
-            resolve_conflict_and_retry(parent, d, plan->netName, out, &r);
+        rename_net_with_conflict_check(parent, d, plan->netName, out);
     }
     if (plan->renameAudioR && plan->audioRIndex >= 0) {
-        dnm_rename_audio_endpoint(d->audio[plan->audioRIndex].endpointId,
-                                  plan->audioRName, &r);
+        const WCHAR *ep = d->audio[plan->audioRIndex].endpointId;
+        dnm_regpath_audio(ep, 0, regPath, 600);
+        backup_begin(&bs, regPath, L"audio_render", ep);
+        dnm_rename_audio_endpoint(ep, plan->audioRName, &r);
         dnm_history_log_rename(d, L"audio_endpoint_render",
                                d->audio[plan->audioRIndex].friendlyName,
                                plan->audioRName, &r);
-        out->code = worse(out->code, r.code);
         append_line(out->message, 1024, L"");
-        append_line(out->message, 1024, L"[オーディオ出力エンドポイント]");
-        append_line(out->message, 1024, r.message);
+        rename_step(out, regPath, L"audio_render", ep,
+                    L"[オーディオ出力エンドポイント]", &r, &bs);
     }
     if (plan->renameAudioC && plan->audioCIndex >= 0) {
-        dnm_rename_audio_endpoint(d->audio[plan->audioCIndex].endpointId,
-                                  plan->audioCName, &r);
+        const WCHAR *ep = d->audio[plan->audioCIndex].endpointId;
+        dnm_regpath_audio(ep, 1, regPath, 600);
+        backup_begin(&bs, regPath, L"audio_capture", ep);
+        dnm_rename_audio_endpoint(ep, plan->audioCName, &r);
         dnm_history_log_rename(d, L"audio_endpoint_capture",
                                d->audio[plan->audioCIndex].friendlyName,
                                plan->audioCName, &r);
-        out->code = worse(out->code, r.code);
         append_line(out->message, 1024, L"");
-        append_line(out->message, 1024, L"[オーディオ入力エンドポイント]");
-        append_line(out->message, 1024, r.message);
+        rename_step(out, regPath, L"audio_capture", ep,
+                    L"[オーディオ入力エンドポイント]", &r, &bs);
     }
 
     if (out->message[0] == 0) {
