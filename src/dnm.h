@@ -310,6 +310,7 @@ void dnm_dlg_details(HWND parent, const DeviceInfo *d);
 BOOL dnm_dlg_cleanup(HWND parent, DeviceList *list, int targetIndex);
 void dnm_dlg_settings(HWND parent);
 void dnm_dlg_fix_audio_serial(HWND parent, const DeviceInfo *d);
+void dnm_dlg_name_mechanics(HWND parent);
 
 /* ui_main.c が公開するもの */
 extern HINSTANCE g_hInst;

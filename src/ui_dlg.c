@@ -700,19 +700,20 @@ static void rename_init(HWND dlg, RenameCtx *ctx)
              * エンドポイント名をいくら書き換えても変わらない。 */
             const AudioEndpointInfo *ep =
                 &d->audio[ctx->renderIndex >= 0 ? ctx->renderIndex : ctx->captureIndex];
-            WCHAR hint[700];
-            _snwprintf(hint, 700,
+            WCHAR hint[900];
+            _snwprintf(hint, 900,
                 L"「サウンド」画面に出る名前は、Windows が次のように組み立てた\n"
                 L"読み取り専用の値です。直接は書き換えられません。\n"
                 L"    %s (%s)\n"
                 L"     ↑ ここは上の欄で変更   ↑ ここはデバイス側の名前\n\n"
                 L"括弧の中は、この PnP デバイスの名前です。「2- 」のような連番が\n"
-                L"付いているときは、同じ製品の古いインスタンスが元の名前を\n"
-                L"押さえています。「旧インスタンスを整理して名前を変更...」で\n"
-                L"古いほうを片付けると取れます。",
+                L"付いているときは、右クリック →「オーディオの連番を解消」で取れます。\n\n"
+                L"※ この「組み立て名で直接は書けない」のはオーディオだけです。\n"
+                L"   PnP 名とネットワーク接続名はそのまま書き換えられます。\n"
+                L"   詳しくはメイン画面の「名前のしくみ...」ボタンをご覧ください。",
                 ep->deviceDesc[0] ? ep->deviceDesc : L"(名前)",
                 ep->interfaceName[0] ? ep->interfaceName : L"(デバイス名)");
-            hint[699] = 0;
+            hint[899] = 0;
             set_text(dlg, IDC_RN_HINT, hint);
         }
     } else if (ctx->isNet) {
@@ -1047,6 +1048,109 @@ void dnm_dlg_details(HWND parent, const DeviceInfo *d)
 {
     DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_DETAILS), parent,
                     details_proc, (LPARAM)d);
+}
+
+/* ------------------------------------------------------------------ */
+/* 名前のしくみ                                                        */
+/*                                                                     */
+/* 「なぜオーディオだけ手順が要るのか」がアプリの中で分かるようにする。  */
+/* 種別ごとの違いを 1 画面に並べ、特別なのはオーディオだけだと書く。    */
+/* IDD_DETAILS (大きな読み取り専用テキスト + 閉じる) を使い回す。       */
+/* ------------------------------------------------------------------ */
+static const WCHAR *kNameMechanics =
+L"このアプリが変更できる名前は、種別によって仕組みが違います。\r\n"
+L"特別な手順が要るのは オーディオ だけです。\r\n"
+L"\r\n"
+L"────────────────────────────────────────\r\n"
+L"■ PnP デバイス名  (すべての種別に共通)\r\n"
+L"────────────────────────────────────────\r\n"
+L"  DEVPKEY_Device_FriendlyName\r\n"
+L"  直接書き換えられます。変更はすぐ反映されます。\r\n"
+L"  一覧の「表示名」の列がこれです。\r\n"
+L"\r\n"
+L"────────────────────────────────────────\r\n"
+L"■ ネットワーク接続名  (種別: Net)\r\n"
+L"────────────────────────────────────────\r\n"
+L"  NciSetConnectionName (netsh interface set interface と同じ経路)\r\n"
+L"  直接書き換えられます。\r\n"
+L"\r\n"
+L"  注意: 同じ接続名を 2 つ持てません。ぶつかったときは確認画面が出るので、\r\n"
+L"        そこから旧アダプターを削除して続けられます。\r\n"
+L"\r\n"
+L"────────────────────────────────────────\r\n"
+L"■ オーディオのエンドポイント名  (種別: Audio)   ← ここだけ特別\r\n"
+L"────────────────────────────────────────\r\n"
+L"  「サウンド」画面に出る名前は、Windows が組み立てた読み取り専用の値です。\r\n"
+L"\r\n"
+L"      <DeviceDesc> (<インターフェイス名>)\r\n"
+L"      例: \"SPDIF インターフェイス\" + \"2- FX-D03J\"\r\n"
+L"          → \"SPDIF インターフェイス (2- FX-D03J)\"\r\n"
+L"\r\n"
+L"  1) 書けるのは前半 (DeviceDesc) だけです。\r\n"
+L"     後半は PnP デバイス名に由来し、直接は書けません。\r\n"
+L"     実測 (管理者でも非管理者でも同じ結果):\r\n"
+L"       PKEY_Device_FriendlyName           SetValue = 0x80070005\r\n"
+L"       PKEY_DeviceInterface_FriendlyName  SetValue = 0x80070005\r\n"
+L"       PKEY_Device_DeviceDesc             SetValue = 0\r\n"
+L"     つまり 0x80070005 が出るのは権限不足ではなく、書けない値だからです。\r\n"
+L"\r\n"
+L"  2) 同じ製品を挿し直すと、後半に「2- 」のような連番が付きます。\r\n"
+L"     この連番はレジストリのどこにも保存されていません。\r\n"
+L"     (実測: MMDevices / Enum\\SWD\\MMDEVAPI / Enum\\USB 配下を、\r\n"
+L"      バイナリ値も UTF-16 として復号して全走査したが見つからなかった)\r\n"
+L"     MMDevAPI が実行時に付けているので、名前を書き換えても消えません。\r\n"
+L"\r\n"
+L"  3) 消すには右クリック →「オーディオの連番を解消」。\r\n"
+L"     実測で効いたのは次の順序だけです。\r\n"
+L"       1. 旧インスタンスを削除する        … これだけでは連番は残る\r\n"
+L"       2. AudioEndpointBuilder を再起動   … 死んだ登録が片付く\r\n"
+L"                                            (この時点でもまだ残る)\r\n"
+L"       3. デバイスを削除して再検出させる  … ここで解消する\r\n"
+L"\r\n"
+L"────────────────────────────────────────\r\n"
+L"■ 効かなかった方法  (すべて実測)\r\n"
+L"────────────────────────────────────────\r\n"
+L"  pnputil /restart-device\r\n"
+L"      既存のエンドポイントを使い回すため、連番はそのまま。\r\n"
+L"  SWD エンドポイントの PnP 名を書き換える\r\n"
+L"      一度は変わるが、オーディオサービスの再起動で上書きし直される。\r\n"
+L"  MMDevices の古い登録を消す / 書き換える\r\n"
+L"      所有者が SYSTEM で Administrators に削除権が無く、昇格しても拒否。\r\n"
+L"\r\n"
+L"────────────────────────────────────────\r\n"
+L"■ 共通\r\n"
+L"────────────────────────────────────────\r\n"
+L"  変更・削除の直前に、対象のレジストリキーを .reg へ書き出します。\r\n"
+L"  書き出し先は「設定」で指定できます。\r\n"
+L"  レジストリを変更しなかったときは .reg も作りません。\r\n"
+L"  実行後は必ず取り直して、変更が実際に保たれたかを確認します。\r\n";
+
+static INT_PTR CALLBACK namehelp_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_INITDIALOG:
+        SetWindowTextW(dlg, L"名前のしくみ (種別ごとの違い)");
+        set_text(dlg, IDOK, L"閉じる");
+        set_text(dlg, IDC_DT_TEXT, kNameMechanics);
+        /* 読み物なので、開いた瞬間に全選択されていると読みにくい。
+         * 選択を外し、フォーカスは「閉じる」に置く。 */
+        SendDlgItemMessageW(dlg, IDC_DT_TEXT, EM_SETSEL, 0, 0);
+        SetFocus(GetDlgItem(dlg, IDOK));
+        return FALSE;
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDOK || LOWORD(wp) == IDCANCEL) {
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+void dnm_dlg_name_mechanics(HWND parent)
+{
+    DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_DETAILS), parent,
+                    namehelp_proc, 0);
 }
 
 /* ------------------------------------------------------------------ */

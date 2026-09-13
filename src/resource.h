@@ -21,6 +21,7 @@
 #define IDC_LBL_FILTER          1013
 #define IDC_LBL_SEARCH          1014
 #define IDC_BTN_SETTINGS        1015
+#define IDC_BTN_NAMEHELP        1016
 
 /* コンテキストメニュー (設計書 9.1) */
 #define IDM_CTX_RENAME          1100
@@ -31,6 +32,7 @@
 #define IDM_CTX_PRIVINFO        1105
 #define IDM_CTX_SETTINGS        1106
 #define IDM_CTX_AUDIOFIX        1107
+#define IDM_CTX_NAMEHELP        1108
 
 /* 接続名の競合を伝える確認ダイアログ */
 #define IDD_CONFLICT            205

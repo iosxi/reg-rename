@@ -293,6 +293,7 @@ static void show_context_menu(int x, int y)
     if (idx < 0) {
         menu = CreatePopupMenu();
         AppendMenuW(menu, MF_STRING, IDM_CTX_PRIVINFO, L"権限の診断(&P)...");
+        AppendMenuW(menu, MF_STRING, IDM_CTX_NAMEHELP, L"名前のしくみ(&H)...");
         AppendMenuW(menu, MF_STRING, IDM_CTX_SETTINGS, L"設定(&S)...");
         TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
                        x, y, 0, g_hMain, NULL);
@@ -320,6 +321,7 @@ static void show_context_menu(int x, int y)
     AppendMenuW(menu, MF_STRING, IDM_CTX_COPYID,  L"Instance ID をコピー(&Y)");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, IDM_CTX_PRIVINFO, L"権限の診断(&P)...");
+    AppendMenuW(menu, MF_STRING, IDM_CTX_NAMEHELP, L"名前のしくみ(&H)...");
     AppendMenuW(menu, MF_STRING, IDM_CTX_SETTINGS, L"設定(&S)...");
 
     TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
@@ -420,6 +422,8 @@ static void create_children(void)
     mk(L"BUTTON", L"デバイスを削除...", BS_PUSHBUTTON | WS_TABSTOP, IDC_BTN_REMOVE);
     mk(L"BUTTON", L"詳細...", BS_PUSHBUTTON | WS_TABSTOP, IDC_BTN_DETAILS);
     mk(L"BUTTON", L"再スキャン", BS_PUSHBUTTON | WS_TABSTOP, IDC_BTN_RESCAN);
+    mk(L"BUTTON", L"名前のしくみ...", BS_PUSHBUTTON | WS_TABSTOP,
+       IDC_BTN_NAMEHELP);
     mk(L"BUTTON", L"設定...", BS_PUSHBUTTON | WS_TABSTOP, IDC_BTN_SETTINGS);
 
     for (i = 0; i < (int)(sizeof(kKindItems) / sizeof(kKindItems[0])); i++)
@@ -479,7 +483,8 @@ static int min_client_width(void)
 {
     static const int kBtns[] = {
         IDC_BTN_RENAME, IDC_BTN_CLEANUP, IDC_BTN_REMOVE,
-        IDC_BTN_DETAILS, IDC_BTN_RESCAN, IDC_BTN_SETTINGS
+        IDC_BTN_DETAILS, IDC_BTN_RESCAN, IDC_BTN_NAMEHELP,
+        IDC_BTN_SETTINGS
     };
     int i, total = 8 + 8;
     if (!g_hMain || !GetDlgItem(g_hMain, IDC_BTN_RENAME)) return 0;
@@ -565,7 +570,8 @@ static void layout(void)
     {
         static const int kBtns[] = {
             IDC_BTN_RENAME, IDC_BTN_CLEANUP, IDC_BTN_REMOVE,
-            IDC_BTN_DETAILS, IDC_BTN_RESCAN, IDC_BTN_SETTINGS
+            IDC_BTN_DETAILS, IDC_BTN_RESCAN, IDC_BTN_NAMEHELP,
+            IDC_BTN_SETTINGS
         };
         int i;
         y = h - statusH - g_buttonsH + (g_buttonsH - g_ctrlH) / 2;
@@ -628,6 +634,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_CTX_COPYID:  cmd_copy_id(); return 0;
         case IDM_CTX_PRIVINFO: cmd_privilege_info(); return 0;
         case IDM_CTX_AUDIOFIX: cmd_audio_fix(); return 0;
+        case IDM_CTX_NAMEHELP:
+        case IDC_BTN_NAMEHELP: dnm_dlg_name_mechanics(g_hMain); return 0;
         case IDM_CTX_SETTINGS:
         case IDC_BTN_SETTINGS: dnm_dlg_settings(g_hMain); return 0;
         case IDC_BTN_RESCAN:  cmd_rescan();  return 0;
