@@ -258,6 +258,19 @@ static void cmd_privilege_info(void)
     MessageBoxW(g_hMain, body, L"権限の診断", MB_OK | MB_ICONINFORMATION);
 }
 
+/* オーディオの連番を解消する。実行後は状態が変わるので一覧を取り直す。 */
+static void cmd_audio_fix(void)
+{
+    int idx = selected_index();
+    WCHAR keep[MAX_DEVICE_ID_LEN];
+    if (idx < 0) { dnm_status(L"デバイスを選択してください。"); return; }
+
+    dnm_strcpy(keep, MAX_DEVICE_ID_LEN, g_devices.items[idx].instanceId);
+    dnm_dlg_fix_audio_serial(g_hMain, &g_devices.items[idx]);
+    reload_devices();
+    select_by_instance_id(keep);
+}
+
 static void cmd_rescan(void)
 {
     dnm_status(L"デバイスを再スキャンしています...");
@@ -294,6 +307,14 @@ static void show_context_menu(int x, int y)
     AppendMenuW(menu, MF_STRING |
                 (g_devices.items[idx].protect != PROT_NONE ? MF_GRAYED : 0),
                 IDM_CTX_REMOVE, L"デバイスを削除(&D)...");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    if (g_devices.items[idx].audioCount > 0) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(menu, MF_STRING |
+                    (dnm_audio_has_serial(&g_devices.items[idx]) ? 0 : MF_GRAYED),
+                    IDM_CTX_AUDIOFIX,
+                    L"オーディオの連番を解消(&N)...");
+    }
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, IDM_CTX_DETAILS, L"詳細(&I)...");
     AppendMenuW(menu, MF_STRING, IDM_CTX_COPYID,  L"Instance ID をコピー(&Y)");
@@ -606,6 +627,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_CTX_DETAILS: cmd_details(); return 0;
         case IDM_CTX_COPYID:  cmd_copy_id(); return 0;
         case IDM_CTX_PRIVINFO: cmd_privilege_info(); return 0;
+        case IDM_CTX_AUDIOFIX: cmd_audio_fix(); return 0;
         case IDM_CTX_SETTINGS:
         case IDC_BTN_SETTINGS: dnm_dlg_settings(g_hMain); return 0;
         case IDC_BTN_RESCAN:  cmd_rescan();  return 0;

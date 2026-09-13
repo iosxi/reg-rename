@@ -792,3 +792,228 @@ void dnm_remove_device(const DeviceInfo *d, OpResult *res)
         res->message[511] = 0;
     }
 }
+
+/* ------------------------------------------------------------------ */
+/* オーディオの連番 ("2- " 等) を解消する                               */
+/*                                                                     */
+/* 「サウンド」に出る名前は <DeviceDesc> (<インターフェイス名>) で、     */
+/* 同じ名前のエンドポイントが複数あると Windows が括弧の中に "N- " を    */
+/* 付ける。これはレジストリのどこにも保存されていない (実測: 文字列を    */
+/* MMDevices / Enum\SWD\MMDEVAPI / Enum\USB 配下でバイナリ値まで含めて   */
+/* 全走査したが "4- FX" は存在しなかった)。MMDevAPI が実行時に付ける。   */
+/*                                                                     */
+/* したがって名前を書き換えても消えない。実測で効いたのは次の順序だけ:   */
+/*                                                                     */
+/*   1. 旧インスタンスを削除する (これだけでは連番は残る)               */
+/*   2. AudioEndpointBuilder を再起動する                               */
+/*      → MMDevices に残っていた死んだエンドポイント登録が刈り取られる  */
+/*        (ただしこの時点でも連番は残る)                                */
+/*   3. 対象デバイスを削除して再検出させる                              */
+/*      → エンドポイントが作り直され、衝突相手が居ないので番号が付かない */
+/*                                                                     */
+/* 効かなかったもの (実測):                                             */
+/*   pnputil /restart-device  ... 既存のエンドポイントを使い回す        */
+/*   SWD エンドポイントの PnP 名を書き換える                            */
+/*                           ... サービス再起動で元に戻される           */
+/* ------------------------------------------------------------------ */
+
+/* "12- なにか" のように数字とハイフンで始まるか */
+BOOL dnm_has_serial_prefix(const WCHAR *s)
+{
+    int i = 0;
+    if (!s) return FALSE;
+    while (s[i] >= L'0' && s[i] <= L'9') i++;
+    return i > 0 && s[i] == L'-' && s[i + 1] == L' ';
+}
+
+BOOL dnm_audio_has_serial(const DeviceInfo *d)
+{
+    int i;
+    for (i = 0; i < d->audioCount; i++)
+        if (dnm_has_serial_prefix(d->audio[i].interfaceName)) return TRUE;
+    return FALSE;
+}
+
+static BOOL svc_wait(SC_HANDLE svc, DWORD want, DWORD timeoutMs)
+{
+    DWORD waited = 0;
+    SERVICE_STATUS st;
+    while (waited < timeoutMs) {
+        if (!QueryServiceStatus(svc, &st)) return FALSE;
+        if (st.dwCurrentState == want) return TRUE;
+        Sleep(250);
+        waited += 250;
+    }
+    return FALSE;
+}
+
+/* AudioEndpointBuilder を依存サービスごと止めて起こし直す。
+ * 止める前に依存 (Audiosrv) を止めないと ERROR_DEPENDENT_SERVICES_RUNNING。 */
+static BOOL restart_audio_service(WCHAR *err, size_t errCap)
+{
+    SC_HANDLE scm = NULL, svc = NULL;
+    LPENUM_SERVICE_STATUSW deps = NULL;
+    DWORD bytes = 0, count = 0, i;
+    SERVICE_STATUS st;
+    BOOL ok = FALSE;
+
+    err[0] = 0;
+    scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    if (!scm) { _snwprintf(err, errCap, L"サービス制御マネージャーを開けません (%lu)",
+                           (unsigned long)GetLastError()); goto done; }
+
+    svc = OpenServiceW(scm, L"AudioEndpointBuilder",
+                       SERVICE_QUERY_STATUS | SERVICE_STOP | SERVICE_START |
+                       SERVICE_ENUMERATE_DEPENDENTS);
+    if (!svc) { _snwprintf(err, errCap, L"AudioEndpointBuilder を開けません (%lu)",
+                           (unsigned long)GetLastError()); goto done; }
+
+    /* --- 依存サービスを止める ---------------------------------------- */
+    if (!EnumDependentServicesW(svc, SERVICE_ACTIVE, NULL, 0, &bytes, &count) &&
+        GetLastError() == ERROR_MORE_DATA && bytes > 0) {
+        deps = (LPENUM_SERVICE_STATUSW)malloc(bytes);
+        if (deps && EnumDependentServicesW(svc, SERVICE_ACTIVE, deps, bytes,
+                                           &bytes, &count)) {
+            for (i = 0; i < count; i++) {
+                SC_HANDLE dep = OpenServiceW(scm, deps[i].lpServiceName,
+                                             SERVICE_STOP | SERVICE_QUERY_STATUS);
+                if (dep) {
+                    ControlService(dep, SERVICE_CONTROL_STOP, &st);
+                    svc_wait(dep, SERVICE_STOPPED, 15000);
+                    CloseServiceHandle(dep);
+                }
+            }
+        }
+    }
+
+    /* --- 本体を止めて起こす ------------------------------------------ */
+    if (!ControlService(svc, SERVICE_CONTROL_STOP, &st) &&
+        GetLastError() != ERROR_SERVICE_NOT_ACTIVE) {
+        _snwprintf(err, errCap, L"AudioEndpointBuilder を停止できません (%lu)",
+                   (unsigned long)GetLastError());
+        goto done;
+    }
+    svc_wait(svc, SERVICE_STOPPED, 20000);
+
+    if (!StartServiceW(svc, 0, NULL) &&
+        GetLastError() != ERROR_SERVICE_ALREADY_RUNNING) {
+        _snwprintf(err, errCap, L"AudioEndpointBuilder を開始できません (%lu)",
+                   (unsigned long)GetLastError());
+        goto done;
+    }
+    svc_wait(svc, SERVICE_RUNNING, 20000);
+
+    /* --- 依存サービスを戻す ------------------------------------------ */
+    if (deps) {
+        for (i = 0; i < count; i++) {
+            SC_HANDLE dep = OpenServiceW(scm, deps[i].lpServiceName,
+                                         SERVICE_START | SERVICE_QUERY_STATUS);
+            if (dep) {
+                StartServiceW(dep, 0, NULL);
+                svc_wait(dep, SERVICE_RUNNING, 20000);
+                CloseServiceHandle(dep);
+            }
+        }
+    }
+    ok = TRUE;
+
+done:
+    free(deps);
+    if (svc) CloseServiceHandle(svc);
+    if (scm) CloseServiceHandle(scm);
+    return ok;
+}
+
+void dnm_fix_audio_serial(const DeviceInfo *d, OpResult *res)
+{
+    WCHAR keepId[MAX_DEVICE_ID_LEN];
+    WCHAR err[300];
+    OpResult rm;
+    int i;
+
+    res_init(res);
+    dnm_strcpy(keepId, MAX_DEVICE_ID_LEN, d->instanceId);
+
+    if (!dnm_is_elevated()) {
+        res->code = OPR_FAILED;
+        dnm_strcpy(res->message, 1024,
+                   L"この操作には管理者権限が必要です。\n"
+                   L"実行ファイルを右クリックして「管理者として実行」してください。");
+        return;
+    }
+
+    /* --- 1. AudioEndpointBuilder を再起動 ---------------------------- */
+    if (!restart_audio_service(err, 300)) {
+        res->code = OPR_FAILED;
+        _snwprintf(res->message, 1024,
+                   L"オーディオサービスを再起動できませんでした。\n%s", err);
+        res->message[1023] = 0;
+        return;
+    }
+    Sleep(1500);
+
+    /* --- 2. 対象デバイスを削除して再検出させる ----------------------- */
+    dnm_remove_device(d, &rm);
+    dnm_strcpy(res->backupInfo, 1024, rm.backupInfo);
+    if (rm.code != OPR_OK && rm.code != OPR_APPLIED_NOT_KEPT) {
+        res->code = rm.code;
+        _snwprintf(res->message, 1024,
+                   L"オーディオサービスは再起動しましたが、\n"
+                   L"デバイスの再検出に進めませんでした。\n\n%s", rm.message);
+        res->message[1023] = 0;
+        return;
+    }
+
+    dnm_rescan_devices();
+
+    /* --- 3. 戻ってくるのを待つ --------------------------------------- */
+    for (i = 0; i < 40; i++) {
+        DeviceInfo back;
+        Sleep(500);
+        if (dnm_refetch(keepId, &back)) {
+            BOOL present = back.isPresent;
+            free(back.hardwareIds);
+            if (present) break;
+        }
+        if (i % 6 == 5) dnm_rescan_devices();
+    }
+
+    /* --- 4. 連番が取れたか、実際に取り直して確かめる ------------------ */
+    {
+        DeviceList list;
+        DeviceInfo *now = NULL;
+        dnm_list_init(&list);
+        dnm_enumerate(&list);
+        now = dnm_list_find(&list, keepId);
+
+        if (!now) {
+            res->code = OPR_APPLIED_NOT_KEPT;
+            dnm_strcpy(res->message, 1024,
+                       L"再検出したデバイスを見つけられませんでした。\n"
+                       L"「再スキャン」を押すか、USB なら挿し直してください。");
+        } else if (!now->isPresent) {
+            res->code = OPR_APPLIED_NOT_KEPT;
+            dnm_strcpy(res->message, 1024,
+                       L"デバイスがまだ戻っていません。\n"
+                       L"「再スキャン」を押すか、USB なら挿し直してください。");
+        } else if (dnm_audio_has_serial(now)) {
+            res->code = OPR_APPLIED_NOT_KEPT;
+            _snwprintf(res->message, 1024,
+                       L"実行しましたが、連番がまだ残っています。\n"
+                       L"現在の名前: %s\n\n"
+                       L"同じ名前のエンドポイントがまだ他に残っている可能性が"
+                       L"あります。\n「未接続」を表示して、同じ製品の古い"
+                       L"インスタンスが無いか確認してください。",
+                       now->audioCount > 0 ? now->audio[0].friendlyName
+                                           : now->displayName);
+        } else {
+            res->code = OPR_OK;
+            _snwprintf(res->message, 1024,
+                       L"連番を解消しました。\n現在の名前: %s",
+                       now->audioCount > 0 ? now->audio[0].friendlyName
+                                           : now->displayName);
+        }
+        res->message[1023] = 0;
+        dnm_list_free(&list);
+    }
+}

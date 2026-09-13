@@ -180,28 +180,117 @@ static BOOL changed_anything(OpResultCode c)
 /* 削除して続けるかどうかを選ばせる。                                   */
 /* 削除の直前には dnm_remove_device が自分でバックアップを書き出す。     */
 /* ------------------------------------------------------------------ */
+/* lParam は「タイトル \n OK ボタン名 \n 本文」の形。
+ * リソースに文字列を置かない方針なので、3 つまとめて渡す。 */
 static INT_PTR CALLBACK conflict_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
-    const WCHAR *text = (const WCHAR *)GetWindowLongPtrW(dlg, DWLP_USER);
-
     switch (msg) {
-    case WM_INITDIALOG:
-        SetWindowLongPtrW(dlg, DWLP_USER, (LONG_PTR)lp);
-        SetWindowTextW(dlg, L"接続名が使われています");
-        set_text(dlg, IDC_CF_TEXT, (const WCHAR *)lp);
-        set_text(dlg, IDOK,     L"削除する");
+    case WM_INITDIALOG: {
+        const WCHAR *p = (const WCHAR *)lp;
+        WCHAR caption[128], okLabel[64];
+        const WCHAR *nl1, *nl2;
+        size_t n;
+
+        nl1 = wcschr(p, L'\n');
+        nl2 = nl1 ? wcschr(nl1 + 1, L'\n') : NULL;
+        if (!nl1 || !nl2) {   /* 形が違えば本文だけとして扱う */
+            SetWindowTextW(dlg, L"確認");
+            set_text(dlg, IDC_CF_TEXT, p);
+            set_text(dlg, IDOK, L"実行する");
+        } else {
+            n = (size_t)(nl1 - p);
+            if (n > 127) n = 127;
+            wmemcpy(caption, p, n); caption[n] = 0;
+
+            n = (size_t)(nl2 - (nl1 + 1));
+            if (n > 63) n = 63;
+            wmemcpy(okLabel, nl1 + 1, n); okLabel[n] = 0;
+
+            SetWindowTextW(dlg, caption);
+            set_text(dlg, IDC_CF_TEXT, nl2 + 1);
+            set_text(dlg, IDOK, okLabel);
+        }
         set_text(dlg, IDCANCEL, L"キャンセル");
-        /* 既定はキャンセル側。削除は取り消せない。 */
+        /* 既定はキャンセル側。どちらの用途も取り消せない操作を伴う。 */
         SetFocus(GetDlgItem(dlg, IDCANCEL));
         return FALSE;
+    }
 
     case WM_COMMAND:
         if (LOWORD(wp) == IDOK)     { EndDialog(dlg, IDOK);     return TRUE; }
         if (LOWORD(wp) == IDCANCEL) { EndDialog(dlg, IDCANCEL); return TRUE; }
         break;
     }
-    (void)text;
     return FALSE;
+}
+
+/* IDD_CONFLICT は「長い説明 + 2 ボタン」の汎用の形なので使い回す */
+static BOOL confirm_box(HWND parent, const WCHAR *caption, const WCHAR *text,
+                        const WCHAR *okLabel)
+{
+    WCHAR packed[2400];
+    /* conflict_proc は lParam を本文として受け取る。ボタン名とタイトルは
+     * 先頭 2 行に載せて渡す (リソースに文字列を置かない方針のため)。 */
+    _snwprintf(packed, 2400, L"%s\n%s\n%s", caption, okLabel, text);
+    packed[2399] = 0;
+    return DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_CONFLICT), parent,
+                           conflict_proc, (LPARAM)packed) == IDOK;
+}
+
+/* ------------------------------------------------------------------ */
+/* オーディオの連番を解消する                                          */
+/* ------------------------------------------------------------------ */
+void dnm_dlg_fix_audio_serial(HWND parent, const DeviceInfo *d)
+{
+    WCHAR text[1800];
+    OpResult res;
+
+    if (d->audioCount == 0) {
+        MessageBoxW(parent,
+                    L"このデバイスにはオーディオエンドポイントがありません。",
+                    L"オーディオの連番を解消", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (!dnm_audio_has_serial(d)) {
+        WCHAR m[600];
+        _snwprintf(m, 600,
+                   L"このデバイスの名前に連番は付いていません。\n\n現在の名前: %s",
+                   d->audio[0].friendlyName);
+        m[599] = 0;
+        MessageBoxW(parent, m, L"オーディオの連番を解消", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    _snwprintf(text, 1800,
+        L"「%s」の名前に連番が付いています。\r\n"
+        L"\r\n"
+        L"  現在の名前 : %s\r\n"
+        L"  Instance ID: %s\r\n"
+        L"\r\n"
+        L"連番はレジストリに保存されておらず、Windows が同じ名前の\r\n"
+        L"エンドポイントを見つけたときに実行時に付けています。\r\n"
+        L"そのため名前を書き換えても消えません。\r\n"
+        L"\r\n"
+        L"「実行する」を押すと、この順で行います。\r\n"
+        L"  1. オーディオサービス (AudioEndpointBuilder) を再起動\r\n"
+        L"     → 残っている古いエンドポイント登録が片付きます\r\n"
+        L"  2. このデバイスを削除して、すぐに再検出させる\r\n"
+        L"     → エンドポイントが作り直され、連番が付かなくなります\r\n"
+        L"  3. 取り直して、連番が実際に取れたか確認\r\n"
+        L"\r\n"
+        L"削除の直前にレジストリを .reg へ書き出します。\r\n"
+        L"実行中は数秒間、音が途切れます。デバイスは自動で戻ります。\r\n"
+        L"\r\n"
+        L"先に「旧インスタンスを整理して名前を変更」で同じ製品の古い\r\n"
+        L"インスタンスを消しておくと、確実に連番が取れます。",
+        d->displayName, d->audio[0].friendlyName, d->instanceId);
+    text[1799] = 0;
+
+    if (!confirm_box(parent, L"オーディオの連番を解消", text, L"実行する"))
+        return;
+
+    dnm_fix_audio_serial(d, &res);
+    report(parent, L"オーディオの連番を解消", &res);
 }
 
 static BOOL conflict_confirm(HWND parent, const WCHAR *newName,
@@ -240,8 +329,7 @@ static BOOL conflict_confirm(HWND parent, const WCHAR *newName,
         newName);
     text[1999] = 0;
 
-    return DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_CONFLICT), parent,
-                           conflict_proc, (LPARAM)text) == IDOK;
+    return confirm_box(parent, L"接続名が使われています", text, L"削除する");
 }
 
 /* 競合していた旧アダプターを削除する。
@@ -1069,6 +1157,7 @@ static void cleanup_execute(HWND dlg, CleanupCtx *ctx)
     HWND lv = GetDlgItem(dlg, IDC_CU_LIST);
     WCHAR newName[DNM_MAX_NAME];
     WCHAR summary[2048];
+    WCHAR keepId[MAX_DEVICE_ID_LEN];
     DeviceInfo target;
     int i, removed = 0;
     OpResultCode overall = OPR_OK;
@@ -1082,6 +1171,8 @@ static void cleanup_execute(HWND dlg, CleanupCtx *ctx)
     }
 
     summary[0] = 0;
+    dnm_strcpy(keepId, MAX_DEVICE_ID_LEN,
+               ctx->list->items[ctx->targetIndex].instanceId);
 
     /* --- 1. 旧デバイスの削除 ----------------------------------------- */
     for (i = 0; i < ctx->candCount; i++) {
@@ -1171,6 +1262,20 @@ static void cleanup_execute(HWND dlg, CleanupCtx *ctx)
                   : (overall == OPR_FAILED) ? MB_ICONERROR
                                             : MB_ICONWARNING;
         MessageBoxW(dlg, summary, L"旧インスタンスを整理して名前を変更", MB_OK | icon);
+    }
+
+    /* 旧インスタンスを消しても、オーディオの連番はそれだけでは取れない
+     * (実測)。取り直して連番が残っていたら、その場で続けられるようにする。
+     * 勝手には実行しない。デバイスの削除と再検出を伴うため。 */
+    {
+        DeviceList after;
+        DeviceInfo *now;
+        dnm_list_init(&after);
+        dnm_enumerate(&after);
+        now = dnm_list_find(&after, keepId);
+        if (now && now->audioCount > 0 && dnm_audio_has_serial(now))
+            dnm_dlg_fix_audio_serial(dlg, now);
+        dnm_list_free(&after);
     }
 
     ctx->executed = TRUE;

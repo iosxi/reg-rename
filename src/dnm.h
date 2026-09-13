@@ -263,6 +263,13 @@ void dnm_rename_audio_endpoint(const WCHAR *endpointId, const WCHAR *newName, Op
 void dnm_rename_net_alias(const DeviceInfo *d, const WCHAR *newName, OpResult *res);
 void dnm_remove_device(const DeviceInfo *d, OpResult *res);
 
+/* オーディオの連番 ("2- " 等) の検知と解消。
+ * 連番はレジストリに保存されておらず MMDevAPI が実行時に付けるため、
+ * 名前を書き換えても消せない。devops.c のコメントに実測を書いてある。 */
+BOOL dnm_has_serial_prefix(const WCHAR *s);
+BOOL dnm_audio_has_serial(const DeviceInfo *d);
+void dnm_fix_audio_serial(const DeviceInfo *d, OpResult *res);
+
 /* ------------------------------------------------------------------ */
 /* matching.c (設計書 20 章)                                           */
 /* ------------------------------------------------------------------ */
@@ -302,6 +309,7 @@ BOOL dnm_dlg_remove_confirm(HWND parent, const DeviceInfo *d);
 void dnm_dlg_details(HWND parent, const DeviceInfo *d);
 BOOL dnm_dlg_cleanup(HWND parent, DeviceList *list, int targetIndex);
 void dnm_dlg_settings(HWND parent);
+void dnm_dlg_fix_audio_serial(HWND parent, const DeviceInfo *d);
 
 /* ui_main.c が公開するもの */
 extern HINSTANCE g_hInst;

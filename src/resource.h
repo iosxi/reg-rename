@@ -30,6 +30,7 @@
 #define IDM_CTX_COPYID          1104
 #define IDM_CTX_PRIVINFO        1105
 #define IDM_CTX_SETTINGS        1106
+#define IDM_CTX_AUDIOFIX        1107
 
 /* 接続名の競合を伝える確認ダイアログ */
 #define IDD_CONFLICT            205
